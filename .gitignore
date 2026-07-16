@@ -1,0 +1,13 @@
+# Build outputs
+Objects/
+Listings/
+
+# Keil user-specific settings
+*.uvguix*
+
+# SysConfig generated (regenerated on build via BeforeMake)
+core/ti_msp_dl_config.c
+core/ti_msp_dl_config.h
+
+# Keil user editor state
+*.uvoptx
