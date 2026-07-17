@@ -1,20 +1,32 @@
 # DC Motor Car
 
-**Version:** 0.0.0
+**Version:** 1.0.0-dev
 
 ## 项目说明
 
-本项目为基于 TI MSPM0G3507 的 **空白工程**，采用 **app-bsp-middleware-core 四层架构**。
+基于 TI MSPM0G3507 的 **智能小车控制工程**，采用 **app-bsp-middleware-core 四层架构**。
 
-当前仅包含 Keil 项目配置、SDK 路径管理脚本以及最小可编译的 empty 示例代码（`main.c` 中仅有 `SYSCFG_DL_init()` + `while(1)` 循环）。
+当前 1.0-dev 分支已实现：
+- **OLED 显示** — SSD1306 驱动（软件 SPI，含 6x12 / 8x16 ASCII 字库）
+- **LED 指示** — GPIO 控制（亮、灭、翻转、闪烁）
+- **延时服务** — SysTick 精密延时（毫秒 / 微秒）
+- **四层架构** — app / bsp / middleware / core 分层落地，包含完整编码规范
 
 ## 目录结构
 
 ```
 ├── app/                 # 应用层
+│   └── main.c           # 入口：初始化 + 调度
 ├── bsp/                 # 板级支持包
+│   ├── bsp_delay.c/h    # SysTick 延时（ms / us）
+│   └── bsp_led.c/h      # GPIO LED 控制
 ├── middleware/          # 中间件层
+│   ├── mid_oled.c/h     # SSD1306 OLED 驱动（framebuffer）
+│   └── mid_oledfont.h   # ASCII 字库（6x12 / 8x16）
 ├── core/                # 核心层
+│   ├── ti_msp_dl_config.c/h  # SysConfig 生成代码
+│   ├── startup_mspm0g350x_uvision.s
+│   └── DC-Motor-Car.syscfg   # 外设配置源文件
 ├── tools/keil/          # SysConfig 工具链集成
 ├── sdk_config.ini       # Windows TI SDK / SysConfig 路径配置
 ├── apply_sdk_paths.bat  # 根据 sdk_config.ini 更新 .uvprojx 路径
@@ -25,12 +37,12 @@
 
 本项目采用 **app / bsp / middleware / core** 四层架构，各层职责和依赖关系如下：
 
-| 层 | 职责 | 可包含的依赖 |
-|----|------|-------------|
-| **app/** | 应用逻辑：主循环、状态机、控制算法 | middleware/、bsp/、core/(ti_msp_dl_config.h) |
-| **middleware/** | 协议/融合层：传感器数据处理、通信协议、算法抽象 | bsp/、core/(ti_msp_dl_config.h) |
-| **bsp/** | 板级驱动：外设封装（GPIO、UART、PWM、ADC 等） | core/(ti_msp_dl_config.h) 及标准库 |
-| **core/** | 启动文件、SysConfig 生成代码、链接脚本 | 不包含上层任何文件 |
+| 层 | 职责 | 可包含的依赖 | 当前模块 |
+|----|------|-------------|---------|
+| **app/** | 应用逻辑：主循环、状态机、控制算法 | middleware/、bsp/、core/ | `main.c`（入口） |
+| **middleware/** | 协议/融合层：传感器数据处理、通信协议、算法抽象 | bsp/、core/ | `mid_oled`（SSD1306 驱动） |
+| **bsp/** | 板级驱动：外设封装（GPIO、UART、PWM、ADC 等） | core/（`ti_msp_dl_config.h`）及标准库 | `bsp_delay`（延时）、`bsp_led`（LED） |
+| **core/** | 启动文件、SysConfig 生成代码、链接脚本 | 不包含上层任何文件 | `ti_msp_dl_config.c/h` |
 
 ### 关键规范
 
@@ -240,9 +252,9 @@ app/  →  middleware/  →  bsp/  →  core/ (ti_msp_dl_config.h)
 | 项目 | 内容 |
 |------|------|
 | 文件 | `bsp/bsp_delay.c` + `bsp/bsp_delay.h` |
-| 接口 | `void BSP_Delay_ms(uint32_t ms)` |
-| 实现 | 基于 SysTick 或 TIMGx 定时器，封装在 BSP 内部 |
-| 调用方 | 不关心具体定时器实现，直接调 `BSP_Delay_ms()` 即可 |
+| 接口 | `void BSP_Delay_ms(uint32_t ms)`、`void BSP_Delay_us(uint32_t us)` |
+| 实现 | 基于 SysTick（1ms 中断 + 寄存器级 µs 补偿），封装在 BSP 内部 |
+| 调用方 | 不关心具体定时器实现，直接调 `BSP_Delay_ms()` / `BSP_Delay_us()` 即可 |
 
 ### 9. 新文件加入 Keil 项目
 
@@ -307,6 +319,11 @@ AI（包括本 AI 及后续 vibe coding 中的 AI）完成代码后，**必须�
 
 ## 后续计划
 
-### 1.0 dev — 实现 OLED 显示功能
+### 1.1 dev — 电机控制与传感器
 
-当前版本为 0.0.0 空壳工程，接下来将在独立分支上开发 OLED 显示功能。
+当前 1.0-dev 已完成基础显示和指示功能，后续计划：
+- **电机驱动** — TB6612 / 直流电机 PWM 控制
+- **编码器** — 正交编码器测速
+- **PID 控制** — 速度闭环
+
+> 新功能开发前先修改 `.syscfg` 添加外设，再编写对应 `bsp_` / `mid_` / `app_` 模块。

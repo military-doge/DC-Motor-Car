@@ -30,39 +30,30 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "ti_msp_dl_config.h"
-#include "bsp_delay.h"
-#include "mid_oled.h"
-#include "bsp_led.h"
+#ifndef MID_OLED_H
+#define MID_OLED_H
 
-/* OLED 单元测试：第一屏 Hello World，之后不断向上计数 */
-int main(void)
-{
-    /* [1] Core: SysConfig-generated init (clock, SysTick, GPIO power) */
-    SYSCFG_DL_init();
+#include <stdint.h>
+#include <stdbool.h>
 
-    /* [2] BSP layer */
-    BSP_Delay_Init();
+/* Display geometry */
+#define MID_OLED_WIDTH   128
+#define MID_OLED_HEIGHT  64
+#define MID_OLED_PAGES   8
 
-    /* [3] Middleware layer */
-    MID_OLED_Init();
-    BSP_LED_Init();
+/* Command / data selector */
+#define OLED_CMD   0
+#define OLED_DATA  1
 
-    /* 第一屏：Init OK */
-    MID_OLED_ShowString(0, 0, "Init OK", 16);
-    MID_OLED_RefreshGram();
-    BSP_Delay_ms(1000);
+bool MID_OLED_Init(void);
+void MID_OLED_DisplayOn(void);
+void MID_OLED_DisplayOff(void);
+void MID_OLED_Clear(void);
+void MID_OLED_RefreshGram(void);
+void MID_OLED_DrawPoint(uint8_t x, uint8_t y, uint8_t color);
+void MID_OLED_ShowChar(uint8_t x, uint8_t y, char ch, uint8_t size);
+void MID_OLED_ShowString(uint8_t x, uint8_t y, const char *str, uint8_t size);
+void MID_OLED_ShowNumber(uint8_t x, uint8_t y, uint32_t num, uint8_t len, uint8_t size);
+/* MID_OLED_ShowChinese removed (Chinese font hzk16 was deleted) */
 
-    /* 第二屏：Count 固定显示，数字不断向上计数 */
-    MID_OLED_Clear();
-    MID_OLED_ShowString(0, 0, "Count", 16);
-
-    uint32_t counter = 0;
-    while (1) {
-        MID_OLED_ShowNumber(0, 20, counter, 10, 16);
-        MID_OLED_RefreshGram();
-        counter++;
-        BSP_LED_Flash(100);
-        BSP_Delay_ms(5);
-    }
-}
+#endif /* MID_OLED_H */

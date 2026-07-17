@@ -393,9 +393,28 @@
         </Group>
         <Group>
           <GroupName>bsp</GroupName>
+          <Files>
+            <File>
+              <FileName>bsp_delay.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\bsp\bsp_delay.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_led.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\bsp\bsp_led.c</FilePath>
+            </File>
+          </Files>
         </Group>
         <Group>
           <GroupName>middleware</GroupName>
+          <Files>
+            <File>
+              <FileName>mid_oled.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\middleware\mid_oled.c</FilePath>
+            </File>
+          </Files>
         </Group>
         <Group>
           <GroupName>core</GroupName>
