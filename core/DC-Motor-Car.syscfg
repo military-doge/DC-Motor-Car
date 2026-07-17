@@ -17,6 +17,49 @@ const SYSTICK = scripting.addModule("/ti/driverlib/SYSTICK");
 SYSCTL.forceDefaultClkConfig = true;
 SYSCTL.clockTreeEn           = true;
 
+/* Clock tree: SYSOSC 32MHz → PLL → 80MHz (consistent with WHEELTEC C07A examples) */
+const pll_pdiv        = system.clockTree["PLL_PDIV"];
+pll_pdiv.divideValue  = 2;
+
+const ulpclk_div      = system.clockTree["UDIV"];
+ulpclk_div.divideValue = 2;
+
+const mfclk_gate  = system.clockTree["MFCLKGATE"];
+mfclk_gate.enable = true;
+
+const pll_qdiv           = system.clockTree["PLL_QDIV"];
+pll_qdiv.multiplyValue   = 5;
+
+const hscLkMux         = system.clockTree["HSCLKMUX"];
+hscLkMux.inputSelect   = "HSCLKMUX_SYSPLL2X";
+
 SYSTICK.periodEnable  = true;
 SYSTICK.systickEnable = true;
-SYSTICK.period        = 32000;
+SYSTICK.period        = 80000;
+
+const GPIO  = scripting.addModule("/ti/driverlib/GPIO", {}, false);
+const GPIO1 = GPIO.addInstance();
+const GPIO2 = GPIO.addInstance();
+const GPIO3 = GPIO.addInstance();
+const GPIO4 = GPIO.addInstance();
+const GPIO5 = GPIO.addInstance();
+
+GPIO1.$name                         = "OLED_RST";
+GPIO1.associatedPins[0].$name       = "PIN_RST";
+GPIO1.associatedPins[0].pin.$assign = "PB14";
+
+GPIO2.$name                         = "OLED_DC";
+GPIO2.associatedPins[0].$name       = "PIN_DC";
+GPIO2.associatedPins[0].pin.$assign = "PB15";
+
+GPIO3.$name                         = "OLED_SCL";
+GPIO3.associatedPins[0].$name       = "PIN_SCL";
+GPIO3.associatedPins[0].pin.$assign = "PA28";
+
+GPIO4.$name                         = "OLED_SDA";
+GPIO4.associatedPins[0].$name       = "PIN_SDA";
+GPIO4.associatedPins[0].pin.$assign = "PA31";
+
+GPIO5.$name                         = "LED";
+GPIO5.associatedPins[0].$name       = "led";
+GPIO5.associatedPins[0].pin.$assign = "PB9";
