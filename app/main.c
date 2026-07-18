@@ -32,37 +32,60 @@
 
 #include "ti_msp_dl_config.h"
 #include "bsp_delay.h"
-#include "mid_oled.h"
 #include "bsp_led.h"
+#include "bsp_motor.h"
+#include "bsp_encoder.h"
+#include "bsp_key.h"
+#include "bsp_timer.h"
+#include "mid_oled.h"
+#include "app_control.h"
 
-/* OLED 单元测试：第一屏 Hello World，之后不断向上计数 */
+/* ---- Callback glue (lives in main.c, delegates to app layer) ---- */
+
+static void on_timer_10ms(void)
+{
+    APP_Control_TimerTick();
+}
+
+static void on_key_click(void)
+{
+    APP_Control_ToggleStartStop();
+}
+
+/* ---- Main ---- */
+
 int main(void)
 {
-    /* [1] Core: SysConfig-generated init (clock, SysTick, GPIO power) */
+    /* [1] Core: SysConfig-generated init (clock, GPIO, peripherals) */
     SYSCFG_DL_init();
 
-    /* [2] BSP layer */
+    /* [2] BSP layer init */
     BSP_Delay_Init();
-
-    /* [3] Middleware layer */
-    MID_OLED_Init();
     BSP_LED_Init();
+    BSP_Motor_Init();
+    BSP_Encoder_Init();
+    BSP_Key_Init();
+    BSP_Timer_Init();
 
-    /* 第一屏：Init OK */
-    MID_OLED_ShowString(0, 0, "Init OK", 16);
+    /* [3] Middleware layer init */
+    MID_OLED_Init();
+
+    /* [4] App layer init */
+    APP_Control_Init();
+
+    /* [5] Register cross-layer callbacks */
+    BSP_Timer_RegisterCallback(on_timer_10ms);
+    BSP_Key_RegisterClickCallback(on_key_click);
+
+    /* [6] Boot screen */
+    MID_OLED_ShowString(0, 0, "DC Motor Car", 16);
+    MID_OLED_ShowString(0, 20, "Init OK", 16);
     MID_OLED_RefreshGram();
-    BSP_Delay_ms(1000);
-
-    /* 第二屏：Count 固定显示，数字不断向上计数 */
+    BSP_Delay_ms(500);
     MID_OLED_Clear();
-    MID_OLED_ShowString(0, 0, "Count", 16);
 
-    uint32_t counter = 0;
+    /* [7] Main loop: app dispatch only, no business logic here */
     while (1) {
-        MID_OLED_ShowNumber(0, 20, counter, 10, 16);
-        MID_OLED_RefreshGram();
-        counter++;
-        BSP_LED_Flash(100);
-        BSP_Delay_ms(5);
+        APP_Control_Run();
     }
 }

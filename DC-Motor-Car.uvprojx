@@ -389,6 +389,11 @@
               <FileType>1</FileType>
               <FilePath>.\app\main.c</FilePath>
             </File>
+            <File>
+              <FileName>app_control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\app\app_control.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -403,6 +408,26 @@
               <FileName>bsp_led.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\bsp\bsp_led.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_motor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\bsp\bsp_motor.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_encoder.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\bsp\bsp_encoder.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_key.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\bsp\bsp_key.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_timer.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\bsp\bsp_timer.c</FilePath>
             </File>
           </Files>
         </Group>
