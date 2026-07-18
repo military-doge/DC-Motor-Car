@@ -8,14 +8,27 @@
 /**
  * Import the modules used in this configuration.
  */
+const GPIO    = scripting.addModule("/ti/driverlib/GPIO", {}, false);
+const GPIO1   = GPIO.addInstance();
+const GPIO2   = GPIO.addInstance();
+const GPIO3   = GPIO.addInstance();
+const GPIO4   = GPIO.addInstance();
+const GPIO5   = GPIO.addInstance();
+const GPIO6   = GPIO.addInstance();
+const GPIO7   = GPIO.addInstance();
+const GPIO8   = GPIO.addInstance();
+const GPIO9   = GPIO.addInstance();
+const GPIO10  = GPIO.addInstance();
+const PWM     = scripting.addModule("/ti/driverlib/PWM", {}, false);
+const PWM_1   = PWM.addInstance();
 const SYSCTL  = scripting.addModule("/ti/driverlib/SYSCTL");
 const SYSTICK = scripting.addModule("/ti/driverlib/SYSTICK");
+const TIMER   = scripting.addModule("/ti/driverlib/TIMER", {}, false);
+const TIMER_1 = TIMER.addInstance();
 
 /**
  * Write custom configuration values to the imported modules.
  */
-SYSCTL.forceDefaultClkConfig = true;
-SYSCTL.clockTreeEn           = true;
 
 /* Clock tree: SYSOSC 32MHz → PLL → 80MHz (consistent with WHEELTEC C07A examples) */
 const pll_pdiv        = system.clockTree["PLL_PDIV"];
@@ -33,33 +46,121 @@ pll_qdiv.multiplyValue   = 5;
 const hscLkMux         = system.clockTree["HSCLKMUX"];
 hscLkMux.inputSelect   = "HSCLKMUX_SYSPLL2X";
 
+/* ---- SYSCTL / SYSTICK ---- */
+SYSCTL.forceDefaultClkConfig = true;
+SYSCTL.clockTreeEn           = true;
+
 SYSTICK.periodEnable  = true;
 SYSTICK.systickEnable = true;
 SYSTICK.period        = 80000;
 
-const GPIO  = scripting.addModule("/ti/driverlib/GPIO", {}, false);
-const GPIO1 = GPIO.addInstance();
-const GPIO2 = GPIO.addInstance();
-const GPIO3 = GPIO.addInstance();
-const GPIO4 = GPIO.addInstance();
-const GPIO5 = GPIO.addInstance();
+/* ---- GPIO: KEY (PA18, input, no interrupt) ---- */
+GPIO1.$name                         = "KEY";
+GPIO1.associatedPins[0].$name       = "key";
+GPIO1.associatedPins[0].direction   = "INPUT";
+GPIO1.associatedPins[0].pin.$assign = "PA18";
 
-GPIO1.$name                         = "OLED_RST";
-GPIO1.associatedPins[0].$name       = "PIN_RST";
-GPIO1.associatedPins[0].pin.$assign = "PB14";
+/* ---- GPIO: LED (PB9) ---- */
+GPIO2.$name                         = "LED";
+GPIO2.associatedPins[0].$name       = "led";
+GPIO2.associatedPins[0].pin.$assign = "PB9";
 
-GPIO2.$name                         = "OLED_DC";
-GPIO2.associatedPins[0].$name       = "PIN_DC";
-GPIO2.associatedPins[0].pin.$assign = "PB15";
+/* ---- GPIO: BIN — Motor B direction (PA16=IN1, PA17=IN2) ---- */
+GPIO3.port                          = "PORTA";
+GPIO3.$name                         = "BIN";
+GPIO3.associatedPins.create(2);
+GPIO3.associatedPins[0].$name       = "BIN1";
+GPIO3.associatedPins[0].pin.$assign = "PA16";
+GPIO3.associatedPins[1].$name       = "BIN2";
+GPIO3.associatedPins[1].pin.$assign = "PA17";
 
-GPIO3.$name                         = "OLED_SCL";
-GPIO3.associatedPins[0].$name       = "PIN_SCL";
-GPIO3.associatedPins[0].pin.$assign = "PA28";
+/* ---- GPIO: AIN — Motor A direction (PA14=IN1, PA13=IN2) ---- */
+GPIO4.port                          = "PORTA";
+GPIO4.$name                         = "AIN";
+GPIO4.associatedPins.create(2);
+GPIO4.associatedPins[0].$name       = "AIN1";
+GPIO4.associatedPins[0].pin.$assign = "PA14";
+GPIO4.associatedPins[1].$name       = "AIN2";
+GPIO4.associatedPins[1].pin.$assign = "PA13";
 
-GPIO4.$name                         = "OLED_SDA";
-GPIO4.associatedPins[0].$name       = "PIN_SDA";
-GPIO4.associatedPins[0].pin.$assign = "PA31";
+/* ---- GPIO: ENCODERA (PA25=E1A, PA26=E1B, input, rising-edge interrupt) ---- */
+GPIO5.$name                               = "ENCODERA";
+GPIO5.associatedPins.create(2);
+GPIO5.associatedPins[0].$name             = "E1A";
+GPIO5.associatedPins[0].direction         = "INPUT";
+GPIO5.associatedPins[0].polarity          = "RISE";
+GPIO5.associatedPins[0].interruptPriority = "0";
+GPIO5.associatedPins[0].interruptEn       = true;
+GPIO5.associatedPins[0].pin.$assign       = "PA25";
+GPIO5.associatedPins[1].$name             = "E1B";
+GPIO5.associatedPins[1].direction         = "INPUT";
+GPIO5.associatedPins[1].polarity          = "RISE";
+GPIO5.associatedPins[1].interruptPriority = "0";
+GPIO5.associatedPins[1].interruptEn       = true;
+GPIO5.associatedPins[1].pin.$assign       = "PA26";
 
-GPIO5.$name                         = "LED";
-GPIO5.associatedPins[0].$name       = "led";
-GPIO5.associatedPins[0].pin.$assign = "PB9";
+/* ---- GPIO: ENCODERB (PB20=E2A, PB24=E2B, input, rising-edge interrupt) ---- */
+GPIO6.$name                               = "ENCODERB";
+GPIO6.associatedPins.create(2);
+GPIO6.associatedPins[0].$name             = "E2A";
+GPIO6.associatedPins[0].direction         = "INPUT";
+GPIO6.associatedPins[0].polarity          = "RISE";
+GPIO6.associatedPins[0].interruptPriority = "0";
+GPIO6.associatedPins[0].interruptEn       = true;
+GPIO6.associatedPins[0].pin.$assign       = "PB20";
+GPIO6.associatedPins[1].$name             = "E2B";
+GPIO6.associatedPins[1].direction         = "INPUT";
+GPIO6.associatedPins[1].polarity          = "RISE";
+GPIO6.associatedPins[1].interruptPriority = "0";
+GPIO6.associatedPins[1].interruptEn       = true;
+GPIO6.associatedPins[1].pin.$assign       = "PB24";
+
+/* ---- GPIO: OLED_RST (PB14) ---- */
+GPIO7.$name                         = "OLED_RST";
+GPIO7.associatedPins[0].$name       = "PIN_RST";
+GPIO7.associatedPins[0].pin.$assign = "PB14";
+
+/* ---- GPIO: OLED_DC (PB15) ---- */
+GPIO8.$name                         = "OLED_DC";
+GPIO8.associatedPins[0].$name       = "PIN_DC";
+GPIO8.associatedPins[0].pin.$assign = "PB15";
+
+/* ---- GPIO: OLED_SCL (PA28) ---- */
+GPIO9.$name                         = "OLED_SCL";
+GPIO9.associatedPins[0].$name       = "PIN_SCL";
+GPIO9.associatedPins[0].pin.$assign = "PA28";
+
+/* ---- GPIO: OLED_SDA (PA31) ---- */
+GPIO10.$name                         = "OLED_SDA";
+GPIO10.associatedPins[0].$name       = "PIN_SDA";
+GPIO10.associatedPins[0].pin.$assign = "PA31";
+
+/* ---- PWM: TIMA1, CCP0=PB2, CCP1=PB3, period=8000 ---- */
+PWM_1.$name                      = "PWM_0";
+PWM_1.timerStartTimer            = true;
+PWM_1.pwmMode                    = "EDGE_ALIGN_UP";
+PWM_1.timerCount                 = 8000;
+PWM_1.peripheral.$assign         = "TIMA1";
+PWM_1.peripheral.ccp0Pin.$assign = "PB2";
+PWM_1.peripheral.ccp1Pin.$assign = "PB3";
+PWM_1.PWM_CHANNEL_0.$name        = "ti_driverlib_pwm_PWMTimerCC0";
+PWM_1.PWM_CHANNEL_1.$name        = "ti_driverlib_pwm_PWMTimerCC1";
+PWM_1.ccp0PinConfig.$name        = "ti_driverlib_gpio_GPIOPinGeneric4";
+PWM_1.ccp1PinConfig.$name        = "ti_driverlib_gpio_GPIOPinGeneric5";
+
+/* ---- TIMER: TIMG0, 10ms periodic, ZERO interrupt ---- */
+TIMER_1.$name              = "TIMER_0";
+TIMER_1.timerClkPrescale   = 32;
+TIMER_1.timerMode          = "PERIODIC";
+TIMER_1.timerStartTimer    = true;
+TIMER_1.interrupts         = ["ZERO"];
+TIMER_1.timerPeriod        = "10 ms";
+TIMER_1.peripheral.$assign = "TIMG0";
+
+/**
+ * Pinmux solution for unlocked pins/peripherals.
+ */
+const Board = scripting.addModule("/ti/driverlib/Board", {}, false);
+Board.peripheral.$suggestSolution          = "DEBUGSS";
+Board.peripheral.swclkPin.$suggestSolution = "PA20";
+Board.peripheral.swdioPin.$suggestSolution = "PA19";

@@ -1,12 +1,17 @@
 # DC Motor Car
 
-**Version:** 1.0.0-dev
+**Version:** 1.1.0-dev
 
 ## 项目说明
 
 基于 TI MSPM0G3507 的 **智能小车控制工程**，采用 **app-bsp-middleware-core 四层架构**。
 
-当前 1.0-dev 分支已实现：
+当前 1.1-dev 分支已实现：
+- **电机驱动** — TB6612 双路 H 桥 PWM 控制（正反转 + 占空比）
+- **编码器测速** — 双路正交编码器 2x 解码（GPIO 中断 + ISR 内实时计数）
+- **PI 速度闭环** — 增量式离散 PI 控制器（deadband + 低通滤波）
+- **按键控制** — 单击检测状态机
+- **10ms 定时器** — 周期性定时器 ISR（回调模式）
 - **OLED 显示** — SSD1306 驱动（软件 SPI，含 6x12 / 8x16 ASCII 字库）
 - **LED 指示** — GPIO 控制（亮、灭、翻转、闪烁）
 - **延时服务** — SysTick 精密延时（毫秒 / 微秒）
@@ -16,10 +21,16 @@
 
 ```
 ├── app/                 # 应用层
-│   └── main.c           # 入口：初始化 + 调度
+│   ├── main.c           # 入口：初始化 + 调度
+│   ├── app_control.c    # 应用控制：PI 速度闭环 + 显示更新
+│   └── app_control.h
 ├── bsp/                 # 板级支持包
 │   ├── bsp_delay.c/h    # SysTick 延时（ms / us）
-│   └── bsp_led.c/h      # GPIO LED 控制
+│   ├── bsp_led.c/h      # GPIO LED 控制
+│   ├── bsp_motor.c/h    # TB6612 电机 PWM 控制（双路 H 桥）
+│   ├── bsp_encoder.c/h  # 正交编码器 2x 解码（双路 GPIO 中断）
+│   ├── bsp_key.c/h      # 按键状态机（单击/双击检测）
+│   └── bsp_timer.c/h    # 10ms 周期定时器（回调模式）
 ├── middleware/          # 中间件层
 │   ├── mid_oled.c/h     # SSD1306 OLED 驱动（framebuffer）
 │   └── mid_oledfont.h   # ASCII 字库（6x12 / 8x16）
@@ -39,9 +50,9 @@
 
 | 层 | 职责 | 可包含的依赖 | 当前模块 |
 |----|------|-------------|---------|
-| **app/** | 应用逻辑：主循环、状态机、控制算法 | middleware/、bsp/、core/ | `main.c`（入口） |
+| **app/** | 应用逻辑：主循环、状态机、控制算法 | middleware/、bsp/、core/ | `main.c`（入口）、`app_control`（PI 控制 + 显示调度） |
 | **middleware/** | 协议/融合层：传感器数据处理、通信协议、算法抽象 | bsp/、core/ | `mid_oled`（SSD1306 驱动） |
-| **bsp/** | 板级驱动：外设封装（GPIO、UART、PWM、ADC 等） | core/（`ti_msp_dl_config.h`）及标准库 | `bsp_delay`（延时）、`bsp_led`（LED） |
+| **bsp/** | 板级驱动：外设封装（GPIO、UART、PWM、ADC 等） | core/（`ti_msp_dl_config.h`）及标准库 | `bsp_delay`、`bsp_led`、`bsp_motor`、`bsp_encoder`、`bsp_key`、`bsp_timer` |
 | **core/** | 启动文件、SysConfig 生成代码、链接脚本 | 不包含上层任何文件 | `ti_msp_dl_config.c/h` |
 
 ### 关键规范
@@ -210,6 +221,8 @@ int main(void)
 | 回调注册 | BSP 模块提供 `BSP_Xxx_RegisterCallback()` 供 app 层注册 |
 | 共享变量 | ISR 和主循环共享的变量必须加 `volatile`，如 `static volatile bool s_flag;` |
 
+> **编码器例外：** `bsp_encoder.c` 的 `GROUP1_IRQHandler` 不遵循回调模式，而是直接在 ISR 内做 2x 正交解码并累加计数，通过 `GetCount` / `ResetCount` API 暴露给 app 层。这是因为编码器脉冲必须在每个边沿实时处理，无法延迟到回调。
+
 #### 回调模式示例
 
 ```c
@@ -297,7 +310,7 @@ AI（包括本 AI 及后续 vibe coding 中的 AI）完成代码后，**必须�
 - [ ] ISR 内只做：清标志 → 调回调 → 设 volatile？
 - [ ] 外设宏使用 SysConfig 生成的名称而非硬编码？
 - [ ] main.c 只做初始化和调度，无业务逻辑？
-- [ ] 新 .c 文件已加入 Keil 项目对应 Group？
+- [ ] 新 .c 文件已加入 Keil 项目对应 Group？ 没有让用户手动将新文件加入项目？
 - [ ] 注释到位？
 ```
 
@@ -319,11 +332,11 @@ AI（包括本 AI 及后续 vibe coding 中的 AI）完成代码后，**必须�
 
 ## 后续计划
 
-### 1.1 dev — 电机控制与传感器
+### 1.2-dev — 蓝牙模块与指令集
 
-当前 1.0-dev 已完成基础显示和指示功能，后续计划：
-- **电机驱动** — TB6612 / 直流电机 PWM 控制
-- **编码器** — 正交编码器测速
-- **PID 控制** — 速度闭环
+- **蓝牙模块** — 集成蓝牙透传模块（UART 通信）
+- **指令集解析** — MCU 解析上位机/手机端下发的控制指令
+- **数据回传** — 编码器速度、运行状态等数据上报
+- **命令控制** — 支持远程启停、调速等控制命令
 
 > 新功能开发前先修改 `.syscfg` 添加外设，再编写对应 `bsp_` / `mid_` / `app_` 模块。
