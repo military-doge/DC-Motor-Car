@@ -141,26 +141,55 @@ void APP_Control_TimerTick(void)
     s_display_tick++;
 }
 
+/* Convert m/s to a 4-char signed string in cm/s, e.g. "+010", "-003" */
+static void control_fmt_speed(char *buf, float speed_mps)
+{
+    int16_t cms = (int16_t)(speed_mps * 100.0f);
+    uint8_t pos = 0;
+    if (cms < 0) {
+        buf[pos++] = '-';
+        cms = -cms;
+    } else {
+        buf[pos++] = '+';
+    }
+    buf[pos++] = '0' + (cms / 100) % 10;
+    buf[pos++] = '0' + (cms / 10) % 10;
+    buf[pos++] = '0' + cms % 10;
+    buf[pos]   = '\0';
+}
+
 /*
  * Called from main loop. Updates OLED display every 500ms.
+ * Layout (12px font, 128x64):
+ *   L: +010|+009    (target | actual, cm/s)
+ *   R: +010|+009
+ *   Status: RUN/STOP
  */
 void APP_Control_Run(void)
 {
+    char buf_target[5], buf_actual[5];
+
     if (s_display_tick % 50 != 0) {
         return;
     }
 
-    /* Display left motor speed in cm/s */
-    MID_OLED_ShowString(0, 0, "MA_V:", 12);
-    MID_OLED_ShowNumber(40, 0,
-        (uint32_t)(s_motor_left.current_speed * 100.0f), 4, 12);
+    /* Left motor */
+    control_fmt_speed(buf_target, s_motor_left.target_speed);
+    control_fmt_speed(buf_actual, s_motor_left.current_speed);
+    MID_OLED_ShowString(0, 0, "L:", 12);
+    MID_OLED_ShowString(12, 0, buf_target, 12);
+    MID_OLED_ShowString(42, 0, "|", 12);
+    MID_OLED_ShowString(48, 0, buf_actual, 12);
 
-    /* Display right motor speed in cm/s */
-    MID_OLED_ShowString(0, 20, "MB_V:", 12);
-    MID_OLED_ShowNumber(40, 20,
-        (uint32_t)(s_motor_right.current_speed * 100.0f), 4, 12);
+    /* Right motor */
+    control_fmt_speed(buf_target, s_motor_right.target_speed);
+    control_fmt_speed(buf_actual, s_motor_right.current_speed);
+    MID_OLED_ShowString(0, 20, "R:", 12);
+    MID_OLED_ShowString(12, 20, buf_target, 12);
+    MID_OLED_ShowString(42, 20, "|", 12);
+    MID_OLED_ShowString(48, 20, buf_actual, 12);
 
-    /* Display run/stop status */
+    /* Run/stop status */
     MID_OLED_ShowString(0, 40, "Status:", 12);
     MID_OLED_ShowString(60, 40, s_flag_stop ? "STOP" : "RUN ", 12);
 

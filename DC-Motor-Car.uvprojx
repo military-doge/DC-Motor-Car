@@ -429,6 +429,11 @@
               <FileType>1</FileType>
               <FilePath>.\bsp\bsp_timer.c</FilePath>
             </File>
+            <File>
+              <FileName>bsp_uart.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\bsp\bsp_uart.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -438,6 +443,11 @@
               <FileName>mid_oled.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\middleware\mid_oled.c</FilePath>
+            </File>
+            <File>
+              <FileName>mid_ble.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\middleware\mid_ble.c</FilePath>
             </File>
           </Files>
         </Group>

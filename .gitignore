@@ -11,3 +11,6 @@ core/ti_msp_dl_config.h
 
 # Keil user editor state
 *.uvoptx
+
+# BLE encoder sample logs
+tools/ble/log/

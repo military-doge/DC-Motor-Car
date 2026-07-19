@@ -1,18 +1,20 @@
 # DC Motor Car
 
-**Version:** 1.1.0-dev
+**Version:** 1.2.0-dev
 
 ## 项目说明
 
 基于 TI MSPM0G3507 的 **智能小车控制工程**，采用 **app-bsp-middleware-core 四层架构**。
 
-当前 1.1-dev 分支已实现：
+当前 1.2-dev 分支已实现：
 - **电机驱动** — TB6612 双路 H 桥 PWM 控制（正反转 + 占空比）
 - **编码器测速** — 双路正交编码器 2x 解码（GPIO 中断 + ISR 内实时计数）
 - **PI 速度闭环** — 增量式离散 PI 控制器（deadband + 低通滤波）
+- **UART 通信** — 环形缓冲 + 中断收发
+- **BLE 桥接** — JDY-16 透传模块，MCU 自定义指令集（!ENC 远程采样 + CSV 保存）
 - **按键控制** — 单击检测状态机
 - **10ms 定时器** — 周期性定时器 ISR（回调模式）
-- **OLED 显示** — SSD1306 驱动（软件 SPI，含 6x12 / 8x16 ASCII 字库）
+- **OLED 显示** — SSD1306 驱动（软件 SPI，含 6x12 / 8x16 ASCII 字库），显示左右轮目标/实际速度
 - **LED 指示** — GPIO 控制（亮、灭、翻转、闪烁）
 - **延时服务** — SysTick 精密延时（毫秒 / 微秒）
 - **四层架构** — app / bsp / middleware / core 分层落地，包含完整编码规范
@@ -30,15 +32,19 @@
 │   ├── bsp_motor.c/h    # TB6612 电机 PWM 控制（双路 H 桥）
 │   ├── bsp_encoder.c/h  # 正交编码器 2x 解码（双路 GPIO 中断）
 │   ├── bsp_key.c/h      # 按键状态机（单击/双击检测）
-│   └── bsp_timer.c/h    # 10ms 周期定时器（回调模式）
+│   ├── bsp_timer.c/h    # 10ms 周期定时器（回调模式）
+│   └── bsp_uart.c/h     # UART 环形缓冲 + 中断收发
 ├── middleware/          # 中间件层
+│   ├── mid_ble.c/h      # BLE 桥接 + 指令集解析
 │   ├── mid_oled.c/h     # SSD1306 OLED 驱动（framebuffer）
 │   └── mid_oledfont.h   # ASCII 字库（6x12 / 8x16）
 ├── core/                # 核心层
 │   ├── ti_msp_dl_config.c/h  # SysConfig 生成代码
 │   ├── startup_mspm0g350x_uvision.s
 │   └── DC-Motor-Car.syscfg   # 外设配置源文件
-├── tools/keil/          # SysConfig 工具链集成
+├── tools/               # 工具集
+│   ├── keil/            # SysConfig 工具链集成
+│   └── ble/             # BLE 桥接命令行工具 + ENC CSV 日志
 ├── sdk_config.ini       # Windows TI SDK / SysConfig 路径配置
 ├── apply_sdk_paths.bat  # 根据 sdk_config.ini 更新 .uvprojx 路径
 └── DC-Motor-Car.uvprojx  # Keil 项目文件
@@ -51,8 +57,8 @@
 | 层 | 职责 | 可包含的依赖 | 当前模块 |
 |----|------|-------------|---------|
 | **app/** | 应用逻辑：主循环、状态机、控制算法 | middleware/、bsp/、core/ | `main.c`（入口）、`app_control`（PI 控制 + 显示调度） |
-| **middleware/** | 协议/融合层：传感器数据处理、通信协议、算法抽象 | bsp/、core/ | `mid_oled`（SSD1306 驱动） |
-| **bsp/** | 板级驱动：外设封装（GPIO、UART、PWM、ADC 等） | core/（`ti_msp_dl_config.h`）及标准库 | `bsp_delay`、`bsp_led`、`bsp_motor`、`bsp_encoder`、`bsp_key`、`bsp_timer` |
+| **middleware/** | 协议/融合层：传感器数据处理、通信协议、算法抽象 | bsp/、core/（`mid_ble` 例外：可引用 `app_control.h`） | `mid_ble`（BLE 桥接 + 指令集）、`mid_oled`（SSD1306 驱动） |
+| **bsp/** | 板级驱动：外设封装（GPIO、UART、PWM、ADC 等） | core/（`ti_msp_dl_config.h`）及标准库 | `bsp_delay`、`bsp_led`、`bsp_motor`、`bsp_encoder`、`bsp_key`、`bsp_timer`、`bsp_uart` |
 | **core/** | 启动文件、SysConfig 生成代码、链接脚本 | 不包含上层任何文件 | `ti_msp_dl_config.c/h` |
 
 ### 关键规范
@@ -77,6 +83,56 @@
 - 应用代码**仅使用**生成的宏（`GPIO_LED_PORT`、`UART_0_INST` 等），绝不硬编码寄存器地址或引脚号
 - 新增外设时先修改 `.syscfg`，构建生成 `ti_msp_dl_config.c/h` 后再编写应用代码
 - 手写代码绝不直接修改生成的 `ti_msp_dl_config.c/h`
+
+### 蓝牙指令集扩展规范
+
+> 适用于 `middleware/mid_ble.c` 和 `tools/ble/jdy16_ble.py` 的指令集扩展。
+
+**1. 指令格式**
+
+- 指令以 `!` 开头，大写字母，参数空格分隔，以 `\r\n` 结尾
+- 未识别指令必须返回 `?CMD\r\n`
+- 成功响应：`OK XXX:...\r\n`，失败响应：`ERR XXX:...\r\n`
+
+**2. MCU 端 (`mid_ble.c`) 加指令步骤**
+
+*同步指令*（立即响应，无需后台任务）：
+1. 写 `handle_xxx_command(const char *cmd)` 解析参数（`atoi()` 或手动指针），边界限幅
+2. 在 `dispatch_command()` 中加前缀匹配分支
+3. 无需改动 `MID_BLE_Poll()` 和 `MID_BLE_Init()`
+
+*异步指令*（需要定时轮询，如 `!ENC`）：
+1. 声明 `mid_ble_xxx_task_t` 状态结构体 + `static` 实例
+2. 写 `handle_xxx_command()` 填充任务参数 + `xxx_task_poll()` 做定时逻辑
+3. 在 `dispatch_command()` 加分支
+4. 在 `MID_BLE_Poll()` 中调用 `xxx_task_poll()`
+5. 在 `MID_BLE_Init()` 中初始化 `s_xxx_task.active = 0`
+
+**3. 绝对禁止**
+
+| 禁止 |
+|------|
+| 主循环/命令处理中使用 `BSP_Delay_ms()` 阻塞 |
+| 直接访问 `app_control.c` 的 `static` 变量（如 `s_motor_left.target_speed`） |
+| 需要写操作时先在 `app_control.h` 暴露新的 setter API |
+| 读原始编码器计数（会被 10ms 定时器 ISR 清零） → 用 `APP_Control_GetSpeedA/B()` |
+| 在 `mid_ble.c` 中重复 SysConfig 配置（波特率等） |
+| UART 响应遗漏 `\r\n` 结尾 |
+| 单条回复超过 `LINE_BUF_SIZE`（128 字节） |
+
+**4. Python 端 (`jdy16_ble.py`) 同步**
+
+- 新指令需要 PC 端采集/保存数据 → 在 `send_command()` 加触发逻辑，在 `notification_printer()` 加数据行解析
+- 所有新增指令必须更新 `print_help()` 和 `tools/ble/README.md`
+
+**5. 架构边界**
+
+`mid_ble.c` 可依赖：
+- `bsp_uart` — `BSP_UART_SendString/Byte`、`BSP_UART_Available/ReadByte`
+- `bsp_delay` — `BSP_Delay_GetTick()`
+- `app_control` — getter/setter API（已暴露到 `.h` 的）
+
+新增 middle 或 bsp 的 `.c` 文件必须手动加入 Keil 项目对应 Group。
 
 ---
 
@@ -190,21 +246,28 @@ int main(void)
     SYSCFG_DL_init();
 
     // [2] BSP 层初始化
+    BSP_Delay_Init();
     BSP_LED_Init();
+    BSP_Motor_Init();
+    BSP_Encoder_Init();
+    BSP_Key_Init();
+    BSP_Timer_Init();
     BSP_UART_Init();
-    BSP_Delay_Init();       // 延迟模块（如使用定时器中断模式）
-    // ... 其他 BSP 模块
 
     // [3] Middleware 层初始化
     MID_OLED_Init();
-    // ... 其他 Middleware 模块
+    MID_BLE_Init();
 
     // [4] App 层初始化
     APP_Control_Init();
-    // ... 其他 App 模块
+
+    // [5] 注册跨层回调
+    BSP_Timer_RegisterCallback(on_timer_10ms);
+    BSP_Key_RegisterClickCallback(on_key_click);
 
     while (1) {
-        APP_Control_Run();  // 主循环调度
+        MID_BLE_Poll();
+        APP_Control_Run();
     }
 }
 ```
@@ -332,11 +395,9 @@ AI（包括本 AI 及后续 vibe coding 中的 AI）完成代码后，**必须�
 
 ## 后续计划
 
-### 1.2-dev — 蓝牙模块与指令集
+### 1.3-dev — 灰度循迹
 
-- **蓝牙模块** — 集成蓝牙透传模块（UART 通信）
-- **指令集解析** — MCU 解析上位机/手机端下发的控制指令
-- **数据回传** — 编码器速度、运行状态等数据上报
-- **命令控制** — 支持远程启停、调速等控制命令
+- **灰度传感器** — 多路灰度传感器读取
+- **巡线算法** — PID 巡线控制（偏差 → 差速转向）
 
 > 新功能开发前先修改 `.syscfg` 添加外设，再编写对应 `bsp_` / `mid_` / `app_` 模块。

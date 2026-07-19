@@ -37,7 +37,9 @@
 #include "bsp_encoder.h"
 #include "bsp_key.h"
 #include "bsp_timer.h"
+#include "bsp_uart.h"
 #include "mid_oled.h"
+#include "mid_ble.h"
 #include "app_control.h"
 
 /* ---- Callback glue (lives in main.c, delegates to app layer) ---- */
@@ -66,9 +68,11 @@ int main(void)
     BSP_Encoder_Init();
     BSP_Key_Init();
     BSP_Timer_Init();
+    BSP_UART_Init();
 
     /* [3] Middleware layer init */
     MID_OLED_Init();
+    MID_BLE_Init();
 
     /* [4] App layer init */
     APP_Control_Init();
@@ -86,6 +90,7 @@ int main(void)
 
     /* [7] Main loop: app dispatch only, no business logic here */
     while (1) {
+        MID_BLE_Poll();
         APP_Control_Run();
     }
 }

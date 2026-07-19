@@ -8,6 +8,7 @@
 bool BSP_Delay_Init(void);
 void BSP_Delay_ms(uint32_t ms);
 void BSP_Delay_us(uint32_t us);
+uint32_t BSP_Delay_GetTick(void);
 
 /* Override this macro to feed the watchdog during busy-wait delay loops.
  * Example when WWDT is enabled via SysConfig:
