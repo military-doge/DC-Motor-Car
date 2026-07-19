@@ -15,7 +15,7 @@ bool BSP_Delay_Init(void)
     return true;
 }
 
-static uint32_t delay_millis(void)
+uint32_t BSP_Delay_GetTick(void)
 {
     return s_delay_millis;
 }
@@ -23,8 +23,8 @@ static uint32_t delay_millis(void)
 void BSP_Delay_ms(uint32_t ms)
 {
     if (ms == 0) return;
-    uint32_t start = delay_millis();
-    while ((delay_millis() - start) < ms) { BSP_DELAY_WDT_FEED(); }
+    uint32_t start = BSP_Delay_GetTick();
+    while ((BSP_Delay_GetTick() - start) < ms) { BSP_DELAY_WDT_FEED(); }
 }
 
 void BSP_Delay_us(uint32_t us)
@@ -34,8 +34,8 @@ void BSP_Delay_us(uint32_t us)
     /* Whole-millisecond portion: use the millis counter (no wraparound limit) */
     uint32_t ms = us / 1000;
     if (ms > 0) {
-        uint32_t start = delay_millis();
-        while ((delay_millis() - start) < ms) { BSP_DELAY_WDT_FEED(); }
+        uint32_t start = BSP_Delay_GetTick();
+        while ((BSP_Delay_GetTick() - start) < ms) { BSP_DELAY_WDT_FEED(); }
     }
 
     /*
