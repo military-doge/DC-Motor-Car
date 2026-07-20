@@ -1,22 +1,23 @@
 #include "app_control.h"
 #include "bsp_motor.h"
 #include "bsp_encoder.h"
+#include "bsp_grayscale.h"
 #include "bsp_key.h"
 #include "bsp_led.h"
 #include "mid_oled.h"
+#include "mid_line_track.h"
 
 /* ---- Physical constants ---- */
 #define CONTROL_FREQ             100.0f
 #define CONTROL_PERIMETER        0.2104867f
 #define CONTROL_ENCODER_LINES    13
 #define CONTROL_MULTIPLY_FACTOR  2
-#define CONTROL_GEAR_RATIO       30
+#define CONTROL_GEAR_RATIO       20
 #define CONTROL_SPEED_ALPHA      0.4f
 #define CONTROL_DEADBAND         0.005f
 #define CONTROL_PWM_MAX          7800
-#define CONTROL_PID_KP           400.0f
-#define CONTROL_PID_KI           300.0f
-#define CONTROL_TARGET_SPEED     0.10f
+#define CONTROL_PID_KP           600.0f
+#define CONTROL_PID_KI           450.0f
 
 /* ---- Motor speed state ---- */
 typedef struct {
@@ -30,6 +31,7 @@ static volatile motor_speed_t s_motor_left;
 static volatile motor_speed_t s_motor_right;
 static volatile bool s_flag_stop = true;
 static volatile uint32_t s_display_tick = 0;
+static volatile uint16_t s_sensor_data[BSP_GRAYSCALE_CHANNELS];
 
 /* ---- PI controller state (one set per motor) ---- */
 static float s_last_bias_left;
@@ -107,6 +109,10 @@ void APP_Control_TimerTick(void)
     int16_t count_a, count_b;
     float raw_a, raw_b;
     int16_t pwm_a, pwm_b;
+    uint16_t raw_sensor[BSP_GRAYSCALE_CHANNELS];
+
+    /* 0. Read grayscale sensor (always, for display) */
+    BSP_Grayscale_ReadAll(raw_sensor);
 
     /* 1. Read and reset encoder counts */
     count_a = BSP_Encoder_GetCountA();
@@ -121,7 +127,22 @@ void APP_Control_TimerTick(void)
     control_lowpass_filter(raw_a, &s_motor_left.current_speed);
     control_lowpass_filter(raw_b, &s_motor_right.current_speed);
 
-    /* 4. PI control and PWM output (skip when stopped) */
+    /* 4. Set target speeds based on mode */
+    if (!s_flag_stop) {
+        float left_tgt, right_tgt;
+        /* Tracking mode: compute differential targets from line sensor */
+        MID_LineTrack_Update(raw_sensor,
+            &left_tgt, &right_tgt);
+        s_motor_left.target_speed  = left_tgt;
+        s_motor_right.target_speed = right_tgt;
+    }
+
+    /* Copy sensor data to volatile for display use */
+    for (uint8_t i = 0; i < BSP_GRAYSCALE_CHANNELS; i++) {
+        s_sensor_data[i] = raw_sensor[i];
+    }
+
+    /* 5. PI control and PWM output (skip when stopped) */
     if (!s_flag_stop) {
         pwm_a = control_pi_update(s_motor_left.current_speed,
             s_motor_left.target_speed, &s_last_bias_left,
@@ -132,10 +153,10 @@ void APP_Control_TimerTick(void)
         BSP_Motor_SetPWM(pwm_a, pwm_b);
     }
 
-    /* 5. LED blink (100 ticks = 1 second period) */
+    /* 6. LED blink (100 ticks = 1 second period) */
     BSP_LED_Flash(100);
 
-    /* 6. Key scan (needs 10ms precise timing) */
+    /* 7. Key scan (needs 10ms precise timing) */
     BSP_Key_Scan();
 
     s_display_tick++;
@@ -167,31 +188,54 @@ static void control_fmt_speed(char *buf, float speed_mps)
  */
 void APP_Control_Run(void)
 {
-    char buf_target[5], buf_actual[5];
+    char buf_speed[5];
 
     if (s_display_tick % 50 != 0) {
         return;
     }
 
-    /* Left motor */
-    control_fmt_speed(buf_target, s_motor_left.target_speed);
-    control_fmt_speed(buf_actual, s_motor_left.current_speed);
-    MID_OLED_ShowString(0, 0, "L:", 12);
-    MID_OLED_ShowString(12, 0, buf_target, 12);
-    MID_OLED_ShowString(42, 0, "|", 12);
-    MID_OLED_ShowString(48, 0, buf_actual, 12);
+    MID_OLED_Clear();
 
-    /* Right motor */
-    control_fmt_speed(buf_target, s_motor_right.target_speed);
-    control_fmt_speed(buf_actual, s_motor_right.current_speed);
-    MID_OLED_ShowString(0, 20, "R:", 12);
-    MID_OLED_ShowString(12, 20, buf_target, 12);
-    MID_OLED_ShowString(42, 20, "|", 12);
-    MID_OLED_ShowString(48, 20, buf_actual, 12);
+    if (s_flag_stop) {
+        /* STOP screen */
+        MID_OLED_ShowString(48, 24, "STOP", 12);
+    } else {
+        uint8_t i, cnt = 0;
+        for (i = 0; i < BSP_GRAYSCALE_CHANNELS; i++) {
+            if (s_sensor_data[i]) cnt++;
+        }
 
-    /* Run/stop status */
-    MID_OLED_ShowString(0, 40, "Status:", 12);
-    MID_OLED_ShowString(60, 40, s_flag_stop ? "STOP" : "RUN ", 12);
+        /* Line 0: sensor count + line error */
+        {
+            char buf_cnt[2];
+            buf_cnt[0] = '0' + cnt;
+            buf_cnt[1] = '\0';
+            MID_OLED_ShowString(0, 0, "S:", 12);
+            MID_OLED_ShowString(12, 0, buf_cnt, 12);
+        }
+        {
+            int error = MID_LineTrack_GetError();
+            MID_OLED_ShowString(30, 0, "Er:", 12);
+            if (error < 0) {
+                MID_OLED_ShowString(54, 0, "-", 12);
+                MID_OLED_ShowNumber(62, 0, (uint32_t)(-error), 2, 12);
+            } else {
+                MID_OLED_ShowNumber(54, 0, (uint32_t)error, 2, 12);
+            }
+        }
+
+        /* Line 16: left + right actual speed */
+        control_fmt_speed(buf_speed, s_motor_left.current_speed);
+        MID_OLED_ShowString(0, 16, "L:", 12);
+        MID_OLED_ShowString(12, 16, buf_speed, 12);
+
+        control_fmt_speed(buf_speed, s_motor_right.current_speed);
+        MID_OLED_ShowString(54, 16, "R:", 12);
+        MID_OLED_ShowString(66, 16, buf_speed, 12);
+
+        /* Line 32: status */
+        MID_OLED_ShowString(0, 32, "RUN", 12);
+    }
 
     MID_OLED_RefreshGram();
 }
@@ -201,10 +245,8 @@ void APP_Control_ToggleStartStop(void)
     s_flag_stop = !s_flag_stop;
 
     if (!s_flag_stop) {
-        /* Start: set target speeds for both motors */
-        s_motor_left.target_speed  = CONTROL_TARGET_SPEED;
-        s_motor_right.target_speed = CONTROL_TARGET_SPEED;
-        /* Reset PI state for clean start */
+        /* Start tracking: reset line-track and PI state */
+        MID_LineTrack_Reset();
         s_last_bias_left  = 0.0f;
         s_last_bias_right = 0.0f;
         s_motor_left.pwm_output  = 0.0f;

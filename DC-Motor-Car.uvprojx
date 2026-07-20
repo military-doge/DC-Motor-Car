@@ -434,6 +434,11 @@
               <FileType>1</FileType>
               <FilePath>.\bsp\bsp_uart.c</FilePath>
             </File>
+            <File>
+              <FileName>bsp_grayscale.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\bsp\bsp_grayscale.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -448,6 +453,11 @@
               <FileName>mid_ble.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\middleware\mid_ble.c</FilePath>
+            </File>
+            <File>
+              <FileName>mid_line_track.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\middleware\mid_line_track.c</FilePath>
             </File>
           </Files>
         </Group>
