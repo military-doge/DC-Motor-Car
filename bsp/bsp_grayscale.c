@@ -30,69 +30,65 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "ti_msp_dl_config.h"
-#include "bsp_delay.h"
-#include "bsp_led.h"
-#include "bsp_motor.h"
-#include "bsp_encoder.h"
 #include "bsp_grayscale.h"
-#include "bsp_key.h"
-#include "bsp_timer.h"
-#include "bsp_uart.h"
-#include "mid_oled.h"
-#include "mid_ble.h"
-#include "mid_line_track.h"
-#include "app_control.h"
-/* ---- Callback glue (lives in main.c, delegates to app layer) ---- */
+#include "ti_msp_dl_config.h"
 
-static void on_timer_10ms(void)
+static void grayscale_select_channel(uint8_t channel)
 {
-    APP_Control_TimerTick();
+    if (channel & 1) {
+        DL_GPIO_setPins(GS_AD_PORT, GS_AD_AD0_PIN);
+    } else {
+        DL_GPIO_clearPins(GS_AD_PORT, GS_AD_AD0_PIN);
+    }
+
+    if (channel & 2) {
+        DL_GPIO_setPins(GS_AD_PORT, GS_AD_AD1_PIN);
+    } else {
+        DL_GPIO_clearPins(GS_AD_PORT, GS_AD_AD1_PIN);
+    }
+
+    if (channel & 4) {
+        DL_GPIO_setPins(GS_AD_PORT, GS_AD_AD2_PIN);
+    } else {
+        DL_GPIO_clearPins(GS_AD_PORT, GS_AD_AD2_PIN);
+    }
 }
 
-static void on_key_click(void)
+static uint16_t grayscale_read_out(void)
 {
-    APP_Control_ToggleStartStop();
+    return !!(DL_GPIO_readPins(GS_OUT_PORT, GS_OUT_OUT_PIN));
 }
 
-/* ---- Main ---- */
-
-int main(void)
+static void grayscale_delay_us(uint32_t us)
 {
-    /* [1] Core: SysConfig-generated init (clock, GPIO, peripherals) */
-    SYSCFG_DL_init();
+    uint32_t target = us * (CPUCLK_FREQ / 1000000UL);
+    uint32_t start  = DL_SYSTICK_getValue();
 
-    /* [2] BSP layer init */
-    BSP_Delay_Init();
-    BSP_LED_Init();
-    BSP_Motor_Init();
-    BSP_Encoder_Init();
-    BSP_Grayscale_Init();
-    BSP_Key_Init();
-    BSP_Timer_Init();
-    BSP_UART_Init();
-
-    /* [3] Middleware layer init */
-    MID_OLED_Init();
-    MID_BLE_Init();
-    MID_LineTrack_Init();
-
-    /* [4] App layer init */
-    APP_Control_Init();
-
-    /* [5] Register cross-layer callbacks */
-    BSP_Timer_RegisterCallback(on_timer_10ms);
-    BSP_Key_RegisterClickCallback(on_key_click);
-
-    /* [6] Boot screen */
-    MID_OLED_ShowString(0, 0, "Init OK", 16);
-    MID_OLED_RefreshGram();
-    BSP_Delay_ms(500);
-    MID_OLED_Clear();
-
-    /* [7] Main loop: app dispatch only, no business logic here */
     while (1) {
-        MID_BLE_Poll();
-        APP_Control_Run();
+        uint32_t now     = DL_SYSTICK_getValue();
+        uint32_t elapsed = (start >= now)
+            ? (start - now)
+            : (start + DL_SYSTICK_getPeriod() + 1U - now);
+        if (elapsed >= target) break;
+    }
+}
+
+bool BSP_Grayscale_Init(void)
+{
+    /* Clear all address lines initially (select channel 0) */
+    DL_GPIO_clearPins(GS_AD_PORT,
+        GS_AD_AD0_PIN | GS_AD_AD1_PIN | GS_AD_AD2_PIN);
+
+    return true;
+}
+
+void BSP_Grayscale_ReadAll(uint16_t *out_values)
+{
+    uint8_t i;
+
+    for (i = 0; i < BSP_GRAYSCALE_CHANNELS; i++) {
+        grayscale_select_channel(i);
+        grayscale_delay_us(50);
+        out_values[i] = grayscale_read_out();
     }
 }

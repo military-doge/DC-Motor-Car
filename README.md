@@ -1,12 +1,14 @@
 # DC Motor Car
 
-**Version:** 1.2.0-dev
+**Version:** 1.3.0-dev
 
 ## 项目说明
 
 基于 TI MSPM0G3507 的 **智能小车控制工程**，采用 **app-bsp-middleware-core 四层架构**。
 
-当前 1.2-dev 分支已实现：
+当前 1.3-dev 分支已实现：
+- **巡线算法** — 非线性 PD 巡线控制（查表法衰减 + 差速转向）
+- **灰度传感器** — 8 路数字灰度传感器读取（多路复用 + GPIO 直接读取）
 - **电机驱动** — TB6612 双路 H 桥 PWM 控制（正反转 + 占空比）
 - **编码器测速** — 双路正交编码器 2x 解码（GPIO 中断 + ISR 内实时计数）
 - **PI 速度闭环** — 增量式离散 PI 控制器（deadband + 低通滤波）
@@ -31,13 +33,15 @@
 │   ├── bsp_led.c/h      # GPIO LED 控制
 │   ├── bsp_motor.c/h    # TB6612 电机 PWM 控制（双路 H 桥）
 │   ├── bsp_encoder.c/h  # 正交编码器 2x 解码（双路 GPIO 中断）
+│   ├── bsp_grayscale.c/h # 8 路灰度传感器（多路复用 + GPIO 读取）
 │   ├── bsp_key.c/h      # 按键状态机（单击/双击检测）
 │   ├── bsp_timer.c/h    # 10ms 周期定时器（回调模式）
 │   └── bsp_uart.c/h     # UART 环形缓冲 + 中断收发
 ├── middleware/          # 中间件层
 │   ├── mid_ble.c/h      # BLE 桥接 + 指令集解析
 │   ├── mid_oled.c/h     # SSD1306 OLED 驱动（framebuffer）
-│   └── mid_oledfont.h   # ASCII 字库（6x12 / 8x16）
+│   ├── mid_oledfont.h   # ASCII 字库（6x12 / 8x16）
+│   └── mid_line_track.c/h # 巡线算法（非线性 PD + 查表法）
 ├── core/                # 核心层
 │   ├── ti_msp_dl_config.c/h  # SysConfig 生成代码
 │   ├── startup_mspm0g350x_uvision.s
@@ -57,8 +61,8 @@
 | 层 | 职责 | 可包含的依赖 | 当前模块 |
 |----|------|-------------|---------|
 | **app/** | 应用逻辑：主循环、状态机、控制算法 | middleware/、bsp/、core/ | `main.c`（入口）、`app_control`（PI 控制 + 显示调度） |
-| **middleware/** | 协议/融合层：传感器数据处理、通信协议、算法抽象 | bsp/、core/（`mid_ble` 例外：可引用 `app_control.h`） | `mid_ble`（BLE 桥接 + 指令集）、`mid_oled`（SSD1306 驱动） |
-| **bsp/** | 板级驱动：外设封装（GPIO、UART、PWM、ADC 等） | core/（`ti_msp_dl_config.h`）及标准库 | `bsp_delay`、`bsp_led`、`bsp_motor`、`bsp_encoder`、`bsp_key`、`bsp_timer`、`bsp_uart` |
+| **middleware/** | 协议/融合层：传感器数据处理、通信协议、算法抽象 | bsp/、core/（`mid_ble` 例外：可引用 `app_control.h`） | `mid_ble`（BLE 桥接 + 指令集）、`mid_oled`（SSD1306 驱动）、`mid_line_track`（巡线算法） |
+| **bsp/** | 板级驱动：外设封装（GPIO、UART、PWM、ADC 等） | core/（`ti_msp_dl_config.h`）及标准库 | `bsp_delay`、`bsp_led`、`bsp_motor`、`bsp_encoder`、`bsp_grayscale`、`bsp_key`、`bsp_timer`、`bsp_uart` |
 | **core/** | 启动文件、SysConfig 生成代码、链接脚本 | 不包含上层任何文件 | `ti_msp_dl_config.c/h` |
 
 ### 关键规范
@@ -395,9 +399,8 @@ AI（包括本 AI 及后续 vibe coding 中的 AI）完成代码后，**必须�
 
 ## 后续计划
 
-### 1.3-dev — 灰度循迹
+### 1.4-dev — 陀螺仪方向控制
 
-- **灰度传感器** — 多路灰度传感器读取
-- **巡线算法** — PID 巡线控制（偏差 → 差速转向）
+- **方向闭环** — 以陀螺仪偏航角为反馈，PD 控制器输出差速修正量
 
-> 新功能开发前先修改 `.syscfg` 添加外设，再编写对应 `bsp_` / `mid_` / `app_` 模块。
+> 新功能开发前先修改 `.syscfg` 添加外设（I2C 或 SPI），再编写对应 `bsp_` / `mid_` / `app_` 模块。

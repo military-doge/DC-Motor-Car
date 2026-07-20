@@ -19,6 +19,8 @@ const GPIO7   = GPIO.addInstance();
 const GPIO8   = GPIO.addInstance();
 const GPIO9   = GPIO.addInstance();
 const GPIO10  = GPIO.addInstance();
+const GPIO11  = GPIO.addInstance();
+const GPIO12  = GPIO.addInstance();
 const PWM     = scripting.addModule("/ti/driverlib/PWM", {}, false);
 const PWM1    = PWM.addInstance();
 const SYSCTL  = scripting.addModule("/ti/driverlib/SYSCTL");
@@ -118,6 +120,23 @@ GPIO9.associatedPins[0].pin.$assign = "PA28";
 GPIO10.$name                         = "OLED_SDA";
 GPIO10.associatedPins[0].$name       = "PIN_SDA";
 GPIO10.associatedPins[0].pin.$assign = "PA31";
+
+GPIO11.$name                         = "GS_AD";
+GPIO11.port                          = "PORTA";
+GPIO11.associatedPins.create(3);
+GPIO11.associatedPins[0].$name       = "AD0";
+GPIO11.associatedPins[0].pin.$assign = "PA9";
+GPIO11.associatedPins[1].$name       = "AD1";
+GPIO11.associatedPins[1].pin.$assign = "PA8";
+GPIO11.associatedPins[2].$name       = "AD2";
+GPIO11.associatedPins[2].pin.$assign = "PA12";
+
+GPIO12.$name                         = "GS_OUT";
+GPIO12.port                          = "PORTA";
+GPIO12.associatedPins.create(1);
+GPIO12.associatedPins[0].$name       = "OUT";
+GPIO12.associatedPins[0].direction   = "INPUT";
+GPIO12.associatedPins[0].pin.$assign = "PA27";
 
 PWM1.$name                      = "PWM_0";
 PWM1.timerStartTimer            = true;
