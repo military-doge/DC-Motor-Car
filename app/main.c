@@ -39,20 +39,25 @@
 #include "bsp_key.h"
 #include "bsp_timer.h"
 #include "bsp_uart.h"
+#include "bsp_dma_rx.h"
 #include "mid_oled.h"
 #include "mid_ble.h"
 #include "mid_line_track.h"
+#include "mid_jy62.h"
+#include "mid_gyro_hold.h"
 #include "app_control.h"
+#include "app_gyro_task.h"
 /* ---- Callback glue (lives in main.c, delegates to app layer) ---- */
 
 static void on_timer_10ms(void)
 {
+    BSP_DMA_RX_Process();
     APP_Control_TimerTick();
 }
 
 static void on_key_click(void)
 {
-    APP_Control_ToggleStartStop();
+    APP_GyroTask_Start();
 }
 
 /* ---- Main ---- */
@@ -77,8 +82,15 @@ int main(void)
     MID_BLE_Init();
     MID_LineTrack_Init();
 
+    /* [3.5] Gyro subsystem init */
+    BSP_DMA_RX_Init();
+    BSP_DMA_RX_RegisterCallback(MID_JY62_UartRxIsr);
+    MID_JY62_Init();
+    MID_GyroHold_Init();
+
     /* [4] App layer init */
     APP_Control_Init();
+    APP_GyroTask_Init();
 
     /* [5] Register cross-layer callbacks */
     BSP_Timer_RegisterCallback(on_timer_10ms);

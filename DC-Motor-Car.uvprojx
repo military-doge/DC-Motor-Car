@@ -394,6 +394,11 @@
               <FileType>1</FileType>
               <FilePath>.\app\app_control.c</FilePath>
             </File>
+            <File>
+              <FileName>app_gyro_task.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\app\app_gyro_task.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -439,6 +444,11 @@
               <FileType>1</FileType>
               <FilePath>.\bsp\bsp_grayscale.c</FilePath>
             </File>
+            <File>
+              <FileName>bsp_dma_rx.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\bsp\bsp_dma_rx.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -458,6 +468,16 @@
               <FileName>mid_line_track.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\middleware\mid_line_track.c</FilePath>
+            </File>
+            <File>
+              <FileName>mid_jy62.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\middleware\mid_jy62.c</FilePath>
+            </File>
+            <File>
+              <FileName>mid_gyro_hold.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\middleware\mid_gyro_hold.c</FilePath>
             </File>
           </Files>
         </Group>

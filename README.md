@@ -1,12 +1,12 @@
 # DC Motor Car
 
-**Version:** 1.3.0-dev
+**Version:** 1.4.0-dev
 
 ## 项目说明
 
 基于 TI MSPM0G3507 的 **智能小车控制工程**，采用 **app-bsp-middleware-core 四层架构**。
 
-当前 1.3-dev 分支已实现：
+当前 1.4-dev 分支已实现：
 - **巡线算法** — 非线性 PD 巡线控制（查表法衰减 + 差速转向）
 - **灰度传感器** — 8 路数字灰度传感器读取（多路复用 + GPIO 直接读取）
 - **电机驱动** — TB6612 双路 H 桥 PWM 控制（正反转 + 占空比）
@@ -20,6 +20,10 @@
 - **LED 指示** — GPIO 控制（亮、灭、翻转、闪烁）
 - **延时服务** — SysTick 精密延时（毫秒 / 微秒）
 - **四层架构** — app / bsp / middleware / core 分层落地，包含完整编码规范
+- **JY62 陀螺仪驱动** — 六轴姿态数据 UART 状态机解析（角速度/角度/加速度）
+- **DMA 循环接收** — UART2 + DMA 乒乓缓冲，零中断逐字回调
+- **陀螺仪航向锁** — 比例纠偏控制器（deadband + 限幅）
+- **陀螺仪任务调度** — 原地转向 + 距离驱动状态机
 
 ## 目录结构
 
@@ -27,7 +31,9 @@
 ├── app/                 # 应用层
 │   ├── main.c           # 入口：初始化 + 调度
 │   ├── app_control.c    # 应用控制：PI 速度闭环 + 显示更新
-│   └── app_control.h
+│   ├── app_control.h
+│   ├── app_gyro_task.c  # 陀螺仪任务调度（转向 + 直行）
+│   └── app_gyro_task.h
 ├── bsp/                 # 板级支持包
 │   ├── bsp_delay.c/h    # SysTick 延时（ms / us）
 │   ├── bsp_led.c/h      # GPIO LED 控制
@@ -36,12 +42,15 @@
 │   ├── bsp_grayscale.c/h # 8 路灰度传感器（多路复用 + GPIO 读取）
 │   ├── bsp_key.c/h      # 按键状态机（单击/双击检测）
 │   ├── bsp_timer.c/h    # 10ms 周期定时器（回调模式）
-│   └── bsp_uart.c/h     # UART 环形缓冲 + 中断收发
+│   ├── bsp_uart.c/h     # UART 环形缓冲 + 中断收发
+│   └── bsp_dma_rx.c/h   # UART2 DMA 循环接收
 ├── middleware/          # 中间件层
 │   ├── mid_ble.c/h      # BLE 桥接 + 指令集解析
 │   ├── mid_oled.c/h     # SSD1306 OLED 驱动（framebuffer）
 │   ├── mid_oledfont.h   # ASCII 字库（6x12 / 8x16）
-│   └── mid_line_track.c/h # 巡线算法（非线性 PD + 查表法）
+│   ├── mid_line_track.c/h # 巡线算法（非线性 PD + 查表法）
+│   ├── mid_jy62.c/h      # JY62 六轴陀螺仪驱动
+│   └── mid_gyro_hold.c/h # 陀螺仪航向保持 PD
 ├── core/                # 核心层
 │   ├── ti_msp_dl_config.c/h  # SysConfig 生成代码
 │   ├── startup_mspm0g350x_uvision.s
@@ -399,8 +408,17 @@ AI（包括本 AI 及后续 vibe coding 中的 AI）完成代码后，**必须�
 
 ## 后续计划
 
-### 1.4-dev — 陀螺仪方向控制
+### 2.0 上半 — 控制优化与调试工具链
 
-- **方向闭环** — 以陀螺仪偏航角为反馈，PD 控制器输出差速修正量
+- **引入 KD** — 速度闭环从 PI 升级为 PID，微分项抑制超调，提高动态响应
+- **蓝牙指令集扩展**：
+  - `!SPD <left> <right>` — 手动设置左右轮目标速度（m/s）
+  - `!PID <kp> <ki> <kd>` — 在线调整速度闭环 PID 权重，实时生效
+  - `!SWP <start> <end> <step> <duration_ms>` — 自动扫速计划：按步长递增目标速度，定时记录实际速度，保存 CSV
+- **PC 工具同步** — `tools/ble/jdy16_ble.py` 增加 `!SWP` 触发、CSV 保存、实时绘图辅助调参
+- **灰度循迹优化** — 重新设计 error 映射表 + PD 参数整定，适应更复杂赛道
 
-> 新功能开发前先修改 `.syscfg` 添加外设（I2C 或 SPI），再编写对应 `bsp_` / `mid_` / `app_` 模块。
+### 2.0 下半 — 扩展外设
+
+- **二维数字云台控制** — PWM 舵机驱动，角度控制接口
+- **K230 视觉模块** — 串口通信协议封装，视觉数据处理与融合
