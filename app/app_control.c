@@ -6,6 +6,7 @@
 #include "bsp_led.h"
 #include "mid_oled.h"
 #include "mid_line_track.h"
+#include "app_gyro_task.h"
 
 /* ---- Physical constants ---- */
 #define CONTROL_FREQ             100.0f
@@ -128,13 +129,31 @@ void APP_Control_TimerTick(void)
     control_lowpass_filter(raw_b, &s_motor_right.current_speed);
 
     /* 4. Set target speeds based on mode */
-    if (!s_flag_stop) {
-        float left_tgt, right_tgt;
-        /* Tracking mode: compute differential targets from line sensor */
-        MID_LineTrack_Update(raw_sensor,
-            &left_tgt, &right_tgt);
-        s_motor_left.target_speed  = left_tgt;
-        s_motor_right.target_speed = right_tgt;
+    {
+        bool gyro_active = (APP_GyroTask_GetState() != APP_GYRO_TASK_IDLE);
+
+        if (gyro_active || !s_flag_stop) {
+            float left_tgt, right_tgt;
+
+            if (gyro_active) {
+                /* Gyro task mode: delegate speed targets to task planner */
+                bool task_done = APP_GyroTask_Update(0.30f,
+                    count_a, count_b, &left_tgt, &right_tgt);
+                /* Ensure PI loop runs while task is active */
+                s_flag_stop = false;
+                if (task_done) {
+                    s_flag_stop = true;
+                    BSP_Motor_Stop();
+                }
+            } else {
+                /* Line-tracking mode: compute differential targets from sensor */
+                MID_LineTrack_Update(raw_sensor,
+                    &left_tgt, &right_tgt);
+            }
+
+            s_motor_left.target_speed  = left_tgt;
+            s_motor_right.target_speed = right_tgt;
+        }
     }
 
     /* Copy sensor data to volatile for display use */
@@ -199,6 +218,26 @@ void APP_Control_Run(void)
     if (s_flag_stop) {
         /* STOP screen */
         MID_OLED_ShowString(48, 24, "STOP", 12);
+    } else if (APP_GyroTask_GetState() != APP_GYRO_TASK_IDLE) {
+        /* Gyro task screen */
+        app_gyro_task_state_t task_st = APP_GyroTask_GetState();
+        const char *phase_str = "???";
+        switch (task_st) {
+        case APP_GYRO_TASK_TURN: phase_str = "TURN"; break;
+        case APP_GYRO_TASK_DRIVE: phase_str = "DRIVE"; break;
+        case APP_GYRO_TASK_DONE: phase_str = "DONE"; break;
+        default: break;
+        }
+        MID_OLED_ShowString(0, 0, "Gyro:", 12);
+        MID_OLED_ShowString(36, 0, phase_str, 12);
+
+        control_fmt_speed(buf_speed, s_motor_left.current_speed);
+        MID_OLED_ShowString(0, 16, "L:", 12);
+        MID_OLED_ShowString(12, 16, buf_speed, 12);
+
+        control_fmt_speed(buf_speed, s_motor_right.current_speed);
+        MID_OLED_ShowString(54, 16, "R:", 12);
+        MID_OLED_ShowString(66, 16, buf_speed, 12);
     } else {
         uint8_t i, cnt = 0;
         for (i = 0; i < BSP_GRAYSCALE_CHANNELS; i++) {
