@@ -3,14 +3,9 @@
 
 static bsp_key_callback_t s_click_callback = NULL;
 
-/* Read key state: returns true when pressed (active-low, pulled high when idle) */
-static bool key_is_pressed(void)
-{
-    return (DL_GPIO_readPins(KEY_PORT, KEY_key_PIN) == 0);
-}
-
 bool BSP_Key_Init(void)
 {
+    DL_GPIO_initDigitalInput(KEY_key_IOMUX);
     return true;
 }
 
@@ -24,19 +19,22 @@ void BSP_Key_RegisterClickCallback(bsp_key_callback_t cb)
  * Must be called precisely every 10ms for correct timing.
  * time: double-click wait threshold in ticks (50 = 500ms).
  * Returns: 0 = no action, 1 = single click, 2 = double click.
+ * Active-low: KEY_STATE == 0 when pressed, >0 when released.
  */
+#define KEY_STATE  DL_GPIO_readPins(KEY_PORT, KEY_key_PIN)
+
 static uint8_t key_click_n_double(uint8_t time)
 {
     static uint8_t  s_flag_key, s_count_key, s_double_key;
     static uint16_t s_count_single, s_forever_count;
 
-    if (!key_is_pressed()) {
+    if (KEY_STATE > 0) {
         s_forever_count++;
     } else {
         s_forever_count = 0;
     }
 
-    if (key_is_pressed() && s_flag_key == 0) {
+    if ((KEY_STATE > 0) && (s_flag_key == 0)) {
         s_flag_key = 1;
     }
 
@@ -46,26 +44,26 @@ static uint8_t key_click_n_double(uint8_t time)
             s_count_key = 1;
         }
         if (s_double_key == 3) {
-            s_double_key = 0;
+            s_double_key   = 0;
             s_count_single = 0;
-            return 2;
+            return 2;   /* double click */
         }
     }
 
-    if (!key_is_pressed()) {
-        s_flag_key = 0;
+    if (KEY_STATE == 0) {
+        s_flag_key  = 0;
         s_count_key = 0;
     }
 
     if (s_double_key == 1) {
         s_count_single++;
         if (s_count_single > time && s_forever_count < time) {
-            s_double_key = 0;
+            s_double_key   = 0;
             s_count_single = 0;
-            return 1;
+            return 1;   /* single click */
         }
         if (s_forever_count > time) {
-            s_double_key = 0;
+            s_double_key   = 0;
             s_count_single = 0;
         }
     }
