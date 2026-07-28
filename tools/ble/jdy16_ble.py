@@ -10,10 +10,12 @@ JDY-16 BLE 桥接命令行工具
 运行: python jdy16_ble.py
 
 MCU 指令集:
-  !ENC <dur> <int> [save] - 编码器定时采样
+  !SPD <dur> <int> [save] - 定时采样电机转速 (m/s)
        dur=持续时长(ms)  int=采样间隔(ms)  save=1/s/save 保存CSV
-       例: !ENC 5000 100     每100ms读一次，持续5秒，实时输出
-       例: !ENC 3000 50 save 每50ms读一次，结束后保存到 log/*.csv
+       例: !SPD 5000 100     每100ms读一次，持续5秒，实时输出
+       例: !SPD 3000 50 save 每50ms读一次，结束后保存到 log/*.csv
+  !START [speed]          - 直行启动 (speed: 0.05-0.80 m/s, 默认 0.10)
+  !STOP                   - 停止
 
 内置命令:
   .scan            - 重新扫描 BLE 设备
@@ -58,10 +60,10 @@ g_running: bool = True
 g_disconnect_intentional: bool = False
 g_notify_queue: asyncio.Queue = asyncio.Queue()
 
-# ENC 录制
-g_enc_recording: bool = False
-g_enc_samples: list = []
-g_enc_interval_ms: int = 0
+# SPD 录制
+g_spd_recording: bool = False
+g_spd_samples: list = []
+g_spd_interval_ms: int = 0
 
 # 行缓冲 (处理 BLE 通知分包)
 g_line_buf: str = ""
@@ -95,52 +97,52 @@ def on_disconnect(client):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ENC CSV 保存
+# SPD CSV 保存
 # ══════════════════════════════════════════════════════════════════════════════
 
-def save_enc_csv():
-    global g_enc_recording, g_enc_samples, g_enc_interval_ms
+def save_spd_csv():
+    global g_spd_recording, g_spd_samples, g_spd_interval_ms
 
-    if not g_enc_samples:
+    if not g_spd_samples:
         print("\n[!] 没有编码器数据可保存")
-        g_enc_recording = False
+        g_spd_recording = False
         return
 
     os.makedirs(LOG_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"enc_{timestamp}.csv"
+    filename = f"spd_{timestamp}.csv"
     filepath = os.path.join(LOG_DIR, filename)
 
     try:
         with open(filepath, "w", encoding="utf-8", newline="") as f:
             f.write("time_ms,speed_a_mps,speed_b_mps\n")
-            for i, (a, b) in enumerate(g_enc_samples):
-                time_ms = i * g_enc_interval_ms
+            for i, (a, b) in enumerate(g_spd_samples):
+                time_ms = i * g_spd_interval_ms
                 f.write(f"{time_ms},{a:.6f},{b:.6f}\n")
         print(f"\n[√] 编码器数据已保存: {filepath}")
-        print(f"    采样点数: {len(g_enc_samples)}, 间隔: {g_enc_interval_ms}ms")
+        print(f"    采样点数: {len(g_spd_samples)}, 间隔: {g_spd_interval_ms}ms")
     except OSError as e:
         print(f"\n[X] 保存 CSV 失败: {e}")
 
-    g_enc_recording = False
-    g_enc_samples = []
-    g_enc_interval_ms = 0
+    g_spd_recording = False
+    g_spd_samples = []
+    g_spd_interval_ms = 0
 
 
-def start_enc_recording(cmd: str):
-    global g_enc_recording, g_enc_samples, g_enc_interval_ms
+def start_spd_recording(cmd: str):
+    global g_spd_recording, g_spd_samples, g_spd_interval_ms
 
-    upper = cmd.upper().replace("!ENC", "").strip()
+    upper = cmd.upper().replace("!SPD", "").strip()
     parts = upper.split()
 
     if len(parts) >= 3:
         if parts[2] in ("1", "SAVE", "S"):
-            g_enc_recording = True
-            g_enc_samples = []
+            g_spd_recording = True
+            g_spd_samples = []
             try:
-                g_enc_interval_ms = int(parts[1])
+                g_spd_interval_ms = int(parts[1])
             except ValueError:
-                g_enc_interval_ms = 100
+                g_spd_interval_ms = 100
             return True
     return False
 
@@ -318,8 +320,8 @@ async def send_command(cmd: str) -> None:
         print("[!] 未连接到设备")
         return
 
-    if cmd.upper().startswith("!ENC"):
-        start_enc_recording(cmd)
+    if cmd.upper().startswith("!SPD"):
+        start_spd_recording(cmd)
 
     data = (cmd + "\r\n").encode("utf-8")
     try:
@@ -333,7 +335,7 @@ async def send_command(cmd: str) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def notification_printer():
-    global g_line_buf, g_enc_recording, g_enc_samples
+    global g_line_buf, g_spd_recording, g_spd_samples
 
     while True:
         data = await g_notify_queue.get()
@@ -348,19 +350,19 @@ async def notification_printer():
             sys.stdout.write(f"\r← {line}\n> ")
             sys.stdout.flush()
 
-            if g_enc_recording and line.startswith("ENC:") and line != "ENC_DONE":
+            if g_spd_recording and line.startswith("SPD:") and line != "SPD_DONE":
                 content = line[4:]
                 parts = content.split(",")
                 if len(parts) == 2:
                     try:
                         a = float(parts[0].strip())
                         b = float(parts[1].strip())
-                        g_enc_samples.append((a, b))
+                        g_spd_samples.append((a, b))
                     except ValueError:
                         pass
 
-            if g_enc_recording and line == "ENC_DONE":
-                save_enc_csv()
+            if g_spd_recording and line == "SPD_DONE":
+                save_spd_csv()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -381,19 +383,21 @@ def print_help():
 ║    .quit        退出程序                                             ║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║  MCU 指令 (以 ! 开头):                                               ║
-║    !ENC <dur> <int> [save]  编码器定时采样                            ║
+║    !SPD <dur> <int> [save]  定时采样电机转速 (m/s)                     ║
 ║         dur = 持续时长 (ms)   例: 5000 = 5秒                          ║
 ║         int = 采样间隔 (ms)   例: 100  = 每100ms读一次                 ║
 ║         save = 可选参数，加 "save"/"s"/"1" 启用CSV保存                ║
-║         例: !ENC 5000 100      实时输出，不保存文件                    ║
-║         例: !ENC 3000 50 save  采集后保存到 log/enc_*.csv             ║
+║         例: !SPD 5000 100      实时输出，不保存文件                    ║
+║         例: !SPD 3000 50 save  采集后保存到 log/spd_*.csv             ║
+║    !START [speed]          直行启动 (speed: 0.05-0.80, 默认0.10)       ║
+║    !STOP                   停止                                       ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """)
 
 
 def print_info():
     status = "已连接" if (g_client and g_client.is_connected) else "未连接"
-    rec = "录制中" if g_enc_recording else "空闲"
+    rec = "录制中" if g_spd_recording else "空闲"
     print(f"""
 ╔══════════════════════════════════════════════╗
 ║  连接信息 (MCU 桥接模式)                       ║
@@ -401,7 +405,7 @@ def print_info():
 ║  设备名称:  {g_device_name:<32} ║
 ║  MAC 地址:  {g_device_addr:<32} ║
 ║  连接状态:  {status:<32} ║
-║  ENC 录制:  {rec:<32} ║
+║  SPD 录制:  {rec:<32} ║
 ║  CSV 目录:  {LOG_DIR:<32} ║
 ╚══════════════════════════════════════════════╝
 """)

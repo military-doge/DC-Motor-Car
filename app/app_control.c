@@ -44,6 +44,10 @@ static volatile uint32_t s_calib_pulses_a = 0;
 static volatile uint32_t s_calib_pulses_b = 0;
 static volatile bool     s_calib_done     = false;
 
+/* ---- Direct drive mode (BLE !START) ---- */
+static volatile bool   s_direct_mode  = false;
+static volatile float  s_direct_speed = 0.0f;
+
 /* ---- PI controller state (one set per motor) ---- */
 static float s_last_bias_left;
 static float s_last_bias_right;
@@ -193,6 +197,10 @@ void APP_Control_TimerTick(void)
                     s_flag_stop = true;
                     BSP_Motor_Stop();
                 }
+            } else if (s_direct_mode) {
+                /* Direct drive mode (!START): both wheels at same speed */
+                left_tgt  = s_direct_speed;
+                right_tgt = s_direct_speed;
             } else {
                 /* Line-tracking mode: compute differential targets from sensor */
                 MID_LineTrack_Update(raw_sensor,
@@ -386,6 +394,26 @@ void APP_Control_StartCalibration(void)
 
     /* Lock current heading for straight-line gyro hold */
     MID_GyroHold_SetReference();
+}
+
+void APP_Control_StartDirect(float speed_mps)
+{
+    s_direct_mode  = true;
+    s_direct_speed = speed_mps;
+    s_flag_stop    = false;
+    s_last_bias_left  = 0.0f;
+    s_last_bias_right = 0.0f;
+    s_motor_left.pwm_output  = 0.0f;
+    s_motor_right.pwm_output = 0.0f;
+}
+
+void APP_Control_StopDirect(void)
+{
+    s_direct_mode = false;
+    s_flag_stop   = true;
+    s_motor_left.target_speed  = 0.0f;
+    s_motor_right.target_speed = 0.0f;
+    BSP_Motor_Stop();
 }
 
 float APP_Control_GetSpeedA(void)

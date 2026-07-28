@@ -36,7 +36,7 @@
  * 处理 MCU 自定义指令（! 前缀）。
  *
  * 指令集:
- *   !ENC <dur> <int> [save] → 定时采样电机转速 (m/s)
+ *   !SPD <dur> <int> [save] → 定时采样电机转速 (m/s)
  *
  * 依赖: bsp_uart (PB6=TX, PB7=RX 连接 JDY-16)
  */
@@ -51,8 +51,8 @@
 /* ---- 常量 ---- */
 
 #define LINE_BUF_SIZE   128
-#define ENC_BUF_MAX     512
-#define ENC_DUMP_BATCH  8
+#define SPD_BUF_MAX     512
+#define SPD_DUMP_BATCH  8
 
 /* ---- 编码器采样任务 ---- */
 
@@ -64,18 +64,18 @@ typedef struct {
     uint16_t duration_ms;   /* 总持续时长 (ms) */
     uint16_t buf_count;     /* 实际采样数 */
     uint16_t dump_index;    /* dump 进度 */
-    float    buf_a[ENC_BUF_MAX];
-    float    buf_b[ENC_BUF_MAX];
-} mid_ble_enc_task_t;
+    float    buf_a[SPD_BUF_MAX];
+    float    buf_b[SPD_BUF_MAX];
+} mid_ble_spd_task_t;
 
 /* ---- 静态状态 ---- */
 
 static uint8_t  s_line_buf[LINE_BUF_SIZE];
 static uint16_t s_line_len;
 
-static mid_ble_enc_task_t s_enc_task;
-static uint32_t s_enc_start_ms;
-static uint32_t s_enc_last_ms;
+static mid_ble_spd_task_t s_spd_task;
+static uint32_t s_spd_start_ms;
+static uint32_t s_spd_last_ms;
 
 /* ---- 辅助函数 ---- */
 
@@ -111,11 +111,11 @@ static void ble_uart_send_float(float val, uint8_t decimals)
 
 /* ---- 命令处理 ---- */
 
-/* !ENC <duration_ms> <interval_ms> [save]
+/* !SPD <duration_ms> <interval_ms> [save]
  *   duration_ms: 持续时长 (ms), 最短 = interval_ms
  *   interval_ms: 采样间隔 (ms), 最小 10ms
  *   save: 可选 "1" 或 "save" → 结束时一次性发送全部数据 */
-static void ble_handle_enc_command(const char *cmd)
+static void ble_handle_spd_command(const char *cmd)
 {
     int dur_ms = 0, int_ms = 100, save = 0;
 
@@ -136,22 +136,22 @@ static void ble_handle_enc_command(const char *cmd)
 
     {
         uint16_t max_samples = (uint16_t)(dur_ms / int_ms);
-        if (max_samples > ENC_BUF_MAX) {
-            dur_ms = (int)(int_ms * ENC_BUF_MAX);
+        if (max_samples > SPD_BUF_MAX) {
+            dur_ms = (int)(int_ms * SPD_BUF_MAX);
         }
     }
 
-    s_enc_task.active      = true;
-    s_enc_task.dumping     = false;
-    s_enc_task.interval_ms = (uint16_t)int_ms;
-    s_enc_task.duration_ms = (uint16_t)dur_ms;
-    s_enc_task.save        = (bool)save;
-    s_enc_task.buf_count   = 0;
-    s_enc_task.dump_index  = 0;
-    s_enc_start_ms         = BSP_Delay_GetTick();
-    s_enc_last_ms          = s_enc_start_ms;
+    s_spd_task.active      = true;
+    s_spd_task.dumping     = false;
+    s_spd_task.interval_ms = (uint16_t)int_ms;
+    s_spd_task.duration_ms = (uint16_t)dur_ms;
+    s_spd_task.save        = (bool)save;
+    s_spd_task.buf_count   = 0;
+    s_spd_task.dump_index  = 0;
+    s_spd_start_ms         = BSP_Delay_GetTick();
+    s_spd_last_ms          = s_spd_start_ms;
 
-    BSP_UART_SendString("OK ENC:");
+    BSP_UART_SendString("OK SPD:");
     ble_uart_send_int(dur_ms);
     BSP_UART_SendString("ms int:");
     ble_uart_send_int(int_ms);
@@ -162,52 +162,52 @@ static void ble_handle_enc_command(const char *cmd)
 
 /* ---- 编码器任务轮询 ---- */
 
-static void ble_enc_task_poll(void)
+static void ble_spd_task_poll(void)
 {
     uint16_t i;
 
-    if (!s_enc_task.active) return;
+    if (!s_spd_task.active) return;
 
-    if (s_enc_task.dumping) {
-        uint16_t start = s_enc_task.dump_index;
-        uint16_t end   = start + ENC_DUMP_BATCH;
-        if (end > s_enc_task.buf_count) end = s_enc_task.buf_count;
+    if (s_spd_task.dumping) {
+        uint16_t start = s_spd_task.dump_index;
+        uint16_t end   = start + SPD_DUMP_BATCH;
+        if (end > s_spd_task.buf_count) end = s_spd_task.buf_count;
 
         for (i = start; i < end; i++) {
-            BSP_UART_SendString("ENC:");
-            ble_uart_send_float(s_enc_task.buf_a[i], 3);
+            BSP_UART_SendString("SPD:");
+            ble_uart_send_float(s_spd_task.buf_a[i], 3);
             BSP_UART_SendByte(',');
-            ble_uart_send_float(s_enc_task.buf_b[i], 3);
+            ble_uart_send_float(s_spd_task.buf_b[i], 3);
             BSP_UART_SendString("\r\n");
         }
-        s_enc_task.dump_index = end;
+        s_spd_task.dump_index = end;
 
-        if (end >= s_enc_task.buf_count) {
-            BSP_UART_SendString("ENC_DONE\r\n");
-            s_enc_task.active  = false;
-            s_enc_task.dumping = false;
+        if (end >= s_spd_task.buf_count) {
+            BSP_UART_SendString("SPD_DONE\r\n");
+            s_spd_task.active  = false;
+            s_spd_task.dumping = false;
         }
         return;
     }
 
     {
         uint32_t now     = BSP_Delay_GetTick();
-        uint32_t elapsed = now - s_enc_start_ms;
+        uint32_t elapsed = now - s_spd_start_ms;
 
-        if ((now - s_enc_last_ms) >= s_enc_task.interval_ms) {
-            s_enc_last_ms = now;
+        if ((now - s_spd_last_ms) >= s_spd_task.interval_ms) {
+            s_spd_last_ms = now;
 
             float speed_a = APP_Control_GetSpeedA();
             float speed_b = APP_Control_GetSpeedB();
 
-            if (s_enc_task.save) {
-                if (s_enc_task.buf_count < ENC_BUF_MAX) {
-                    s_enc_task.buf_a[s_enc_task.buf_count] = speed_a;
-                    s_enc_task.buf_b[s_enc_task.buf_count] = speed_b;
-                    s_enc_task.buf_count++;
+            if (s_spd_task.save) {
+                if (s_spd_task.buf_count < SPD_BUF_MAX) {
+                    s_spd_task.buf_a[s_spd_task.buf_count] = speed_a;
+                    s_spd_task.buf_b[s_spd_task.buf_count] = speed_b;
+                    s_spd_task.buf_count++;
                 }
             } else {
-                BSP_UART_SendString("ENC:");
+                BSP_UART_SendString("SPD:");
                 ble_uart_send_float(speed_a, 3);
                 BSP_UART_SendByte(',');
                 ble_uart_send_float(speed_b, 3);
@@ -215,27 +215,66 @@ static void ble_enc_task_poll(void)
             }
         }
 
-        if (elapsed >= s_enc_task.duration_ms) {
-            if (s_enc_task.save && s_enc_task.buf_count > 0) {
-                s_enc_task.dumping    = true;
-                s_enc_task.dump_index = 0;
+        if (elapsed >= s_spd_task.duration_ms) {
+            if (s_spd_task.save && s_spd_task.buf_count > 0) {
+                s_spd_task.dumping    = true;
+                s_spd_task.dump_index = 0;
             } else {
-                BSP_UART_SendString("ENC_DONE\r\n");
-                s_enc_task.active = false;
+                BSP_UART_SendString("SPD_DONE\r\n");
+                s_spd_task.active = false;
             }
         }
     }
+}
+
+/* !START <speed> — 直行启动 (BLE direct drive) */
+static void ble_handle_start_command(const char *cmd)
+{
+    float speed = 0.10f;
+    const char *p = cmd + 6;
+    while (*p == ' ') p++;
+    if (*p >= '0' && *p <= '9') {
+        speed = (float)atof(p);
+    }
+    if (speed < 0.05f)  speed = 0.05f;
+    if (speed > 0.80f)  speed = 0.80f;
+
+    APP_Control_StartDirect(speed);
+    BSP_UART_SendString("OK START speed:");
+    ble_uart_send_float(speed, 2);
+    BSP_UART_SendString("m/s\r\n");
+}
+
+/* !STOP — 停止 */
+static void ble_handle_stop_command(void)
+{
+    APP_Control_StopDirect();
+    BSP_UART_SendString("OK STOP\r\n");
 }
 
 /* ---- 命令分发 ---- */
 
 static void ble_dispatch_command(void)
 {
-    /* !ENC */
+    /* !SPD */
     if (s_line_len >= 5 &&
-        s_line_buf[0] == '!' && s_line_buf[1] == 'E' &&
-        s_line_buf[2] == 'N' && s_line_buf[3] == 'C') {
-        ble_handle_enc_command((const char *)s_line_buf);
+        s_line_buf[0] == '!' && s_line_buf[1] == 'S' &&
+        s_line_buf[2] == 'P' && s_line_buf[3] == 'D') {
+        ble_handle_spd_command((const char *)s_line_buf);
+        return;
+    }
+    /* !STOP (check before !START to avoid ambiguity) */
+    if (s_line_len >= 5 &&
+        s_line_buf[1] == 'S' && s_line_buf[2] == 'T' &&
+        s_line_buf[3] == 'O') {
+        ble_handle_stop_command();
+        return;
+    }
+    /* !START */
+    if (s_line_len >= 6 &&
+        s_line_buf[1] == 'S' && s_line_buf[2] == 'T' &&
+        s_line_buf[3] == 'A') {
+        ble_handle_start_command((const char *)s_line_buf);
         return;
     }
     BSP_UART_SendString("?CMD\r\n");
@@ -247,10 +286,10 @@ bool MID_BLE_Init(void)
 {
     s_line_len = 0;
 
-    s_enc_task.active     = false;
-    s_enc_task.dumping    = false;
-    s_enc_task.buf_count  = 0;
-    s_enc_task.dump_index = 0;
+    s_spd_task.active     = false;
+    s_spd_task.dumping    = false;
+    s_spd_task.buf_count  = 0;
+    s_spd_task.dump_index = 0;
 
     return true;
 }
@@ -259,7 +298,7 @@ void MID_BLE_Poll(void)
 {
     uint8_t byte;
 
-    ble_enc_task_poll();
+    ble_spd_task_poll();
 
     while (BSP_UART_Available() > 0) {
         byte = BSP_UART_ReadByte();

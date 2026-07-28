@@ -10,6 +10,8 @@ void APP_Control_Run(void);
 void APP_Control_ToggleStartStop(void);
 bool APP_Control_IsRunning(void);
 void APP_Control_StartCalibration(void);
+void APP_Control_StartDirect(float speed_mps);
+void APP_Control_StopDirect(void);
 float APP_Control_GetSpeedA(void);
 float APP_Control_GetSpeedB(void);
 
