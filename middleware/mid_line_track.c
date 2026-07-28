@@ -45,25 +45,25 @@
  *   s_kp_table   — proportional gain, from desktop tuned values
  *   s_kd_table   — derivative gain, from desktop tuned values */
 #define MID_TRACK_TBL_SIZE        8
-#define MID_TRACK_BASE_SPEED      0.25f   /* straight-line speed (m/s) */
+#define MID_TRACK_BASE_SPEED      0.28f   /* straight-line speed (m/s) */
 
 static const float s_attenuation_table[MID_TRACK_TBL_SIZE] = {
     1.00f,    /* err=0  — 100%  (straight)    */
-    0.92f,    /* err=1  — 92.0%               */
-    0.76f,    /* err=2  — 76.0%               */
-    0.58f,    /* err=3  — 58.0%               */
-    0.44f,    /* err=4  — 44.0%               */
-    0.34f,    /* err=5  — 34.0%               */
-    0.26f,    /* err=6  — 26.0%               */
-    0.20f,    /* err=7  — 20.0%               */
+    0.96f,    /* err=1  — 96.0%               */
+    0.86f,    /* err=2  — 86.0%               */
+    0.70f,    /* err=3  — 70.0%               */
+    0.56f,    /* err=4  — 56.0%               */
+    0.48f,    /* err=5  — 48.0%               */
+    0.40f,    /* err=6  — 40.0%               */
+    0.35f,    /* err=7  — 35.0%               */
 };
 static const float s_kp_table[MID_TRACK_TBL_SIZE] = {
-    [0] = 0.0065f, [1] = 0.0100f, [2] = 0.0105f, [3] = 0.0105f,
-    [4] = 0.0104f, [5] = 0.0041f, [6] = 0.0140f, [7] = 0.0120f,
+    [0] = 0.0064f, [1] = 0.0100f, [2] = 0.0160f, [3] = 0.0155f,
+    [4] = 0.0115f, [5] = 0.0095f, [6] = 0.0135f, [7] = 0.012f,
 };
 static const float s_kd_table[MID_TRACK_TBL_SIZE] = {
-    [0] = 0.0016f, [1] = 0.0025f, [2] = 0.0008f, [3] = 0.0026f,
-    [4] = 0.0025f, [5] = 0.0010f, [6] = 0.0035f, [7] = 0.0030f,
+    [0] = 0.0022f, [1] = 0.0033f, [2] = 0.0050f, [3] = 0.0050f,
+    [4] = 0.0038f, [5] = 0.0033f, [6] = 0.0052f, [7] = 0.0050f,
 };
 
 /* 8-channel sensor weights (asymmetric, left-to-right) */
@@ -82,18 +82,23 @@ static const int8_t s_track_weights[8] = {
 };
 
 #define MID_TRACK_SEARCH_SPEED  0.15f
-#define MID_TRACK_SEARCH_KP     0.025f
+#define MID_TRACK_SEARCH_KP     0.038f
+#define MID_TRACK_SEARCH_CAP    6
 
 /* ---- Control state ---- */
 static int8_t s_line_error       = 0;
 static int8_t s_prev_error       = 0;
 static int8_t s_last_valid_error = 0;
+static int8_t s_filtered_error   = 0;
+static bool  s_line_lost         = false;
 
 bool MID_LineTrack_Init(void)
 {
     s_line_error       = 0;
     s_prev_error       = 0;
     s_last_valid_error = 0;
+    s_filtered_error   = 0;
+    s_line_lost        = false;
     return true;
 }
 
@@ -102,11 +107,23 @@ void MID_LineTrack_Reset(void)
     s_line_error       = 0;
     s_prev_error       = 0;
     s_last_valid_error = 0;
+    s_filtered_error   = 0;
+    s_line_lost        = false;
 }
 
 int8_t MID_LineTrack_GetError(void)
 {
     return s_line_error;
+}
+
+int8_t MID_LineTrack_GetLastError(void)
+{
+    return s_last_valid_error;
+}
+
+bool MID_LineTrack_IsLineLost(void)
+{
+    return s_line_lost;
 }
 
 /*
@@ -143,6 +160,7 @@ void MID_LineTrack_Update(const uint16_t sensor_data[8],
     /* Intersection → drive straight */
     if (sum == 8) {
         s_line_error  = 0;
+        s_line_lost   = false;
         *out_left_speed  = MID_TRACK_BASE_SPEED;
         *out_right_speed = MID_TRACK_BASE_SPEED;
         return;
@@ -151,10 +169,11 @@ void MID_LineTrack_Update(const uint16_t sensor_data[8],
     /* Line lost → turn toward last known direction */
     if (sum == 0) {
         s_line_error = 0;
+        s_line_lost  = true;
         if (s_last_valid_error != 0) {
             int dir = (s_last_valid_error > 0) ? 1 : -1;
             int mag = (s_last_valid_error > 0) ? s_last_valid_error : -s_last_valid_error;
-            if (mag > 3) mag = 3;
+            if (mag > MID_TRACK_SEARCH_CAP) mag = MID_TRACK_SEARCH_CAP;
             float search_correction = MID_TRACK_SEARCH_KP * (float)(dir * mag);
             *out_left_speed  = MID_TRACK_SEARCH_SPEED + search_correction;
             *out_right_speed = MID_TRACK_SEARCH_SPEED - search_correction;
@@ -167,8 +186,17 @@ void MID_LineTrack_Update(const uint16_t sensor_data[8],
 
     s_line_error = weighted_sum / sum;  /* range: -7 .. +7 */
     s_last_valid_error = s_line_error;
+    s_line_lost = false;
 
-    error     = s_line_error;
+    /* Slew rate limit: clamp error change to ±3 per tick */
+    {
+        int8_t delta = s_line_error - s_filtered_error;
+        if (delta > 3) delta = 3;
+        if (delta < -3) delta = -3;
+        s_filtered_error += delta;
+    }
+
+    error     = s_filtered_error;
     abs_error = (error > 0) ? error : -error;
 
     /* Step 2: base speed = straight speed × attenuation ratio */
@@ -185,7 +213,11 @@ void MID_LineTrack_Update(const uint16_t sensor_data[8],
     correction = kp_eff * (float)error
                + kd_eff * derivative;
 
-    /* Step 6: differential steering output */
+    /* Step 6.5: clamp correction to prevent inner wheel reversal */
+    if (correction > base_speed) correction = base_speed;
+    if (correction < -base_speed) correction = -base_speed;
+
+    /* Step 7: differential steering output */
     *out_left_speed  = base_speed + correction;
     *out_right_speed = base_speed - correction;
 }

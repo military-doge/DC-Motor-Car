@@ -47,17 +47,23 @@
 #include "mid_gyro_hold.h"
 #include "app_control.h"
 #include "app_gyro_task.h"
+#include "app_gyro_path.h"
+#include "app_line_track.h"
 /* ---- Callback glue (lives in main.c, delegates to app layer) ---- */
 
 static void on_timer_10ms(void)
 {
-    APP_Control_TimerTick();
+    APP_GyroPath_TimerTick();
     BSP_DMA_RX_Process();
 }
 
 static void on_key_click(void)
 {
-    APP_Control_StartCalibration();
+    if (APP_GyroPath_IsRunning()) {
+        APP_GyroPath_Stop();
+    } else {
+        APP_GyroPath_Start();
+    }
 }
 
 /* ---- Main ---- */
@@ -91,6 +97,8 @@ int main(void)
     /* [4] App layer init */
     APP_Control_Init();
     APP_GyroTask_Init();
+    APP_GyroPath_Init();
+    APP_LineTrack_Init();
 
     /* [5] Register cross-layer callbacks */
     BSP_Timer_RegisterCallback(on_timer_10ms);
@@ -104,9 +112,6 @@ int main(void)
     /* [7] Main loop */
     while (1) {
         MID_BLE_Poll();
-
-        if (APP_Control_IsRunning()) {
-            APP_Control_Run();
-        }
+        APP_GyroPath_Run();
     }
 }
