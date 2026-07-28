@@ -51,13 +51,13 @@
 
 static void on_timer_10ms(void)
 {
-    BSP_DMA_RX_Process();
     APP_Control_TimerTick();
+    BSP_DMA_RX_Process();
 }
 
 static void on_key_click(void)
 {
-    APP_GyroTask_Start();
+    APP_Control_StartCalibration();
 }
 
 /* ---- Main ---- */
@@ -96,15 +96,17 @@ int main(void)
     BSP_Timer_RegisterCallback(on_timer_10ms);
     BSP_Key_RegisterClickCallback(on_key_click);
 
-    /* [6] Boot screen */
-    MID_OLED_ShowString(0, 0, "Init OK", 16);
+    /* [6] Boot screen: LED on, OLED shows OK, wait for key */
+    BSP_LED_On();
+    MID_OLED_ShowString(48, 24, "OK", 12);
     MID_OLED_RefreshGram();
-    BSP_Delay_ms(500);
-    MID_OLED_Clear();
 
-    /* [7] Main loop: app dispatch only, no business logic here */
+    /* [7] Main loop */
     while (1) {
         MID_BLE_Poll();
-        APP_Control_Run();
+
+        if (APP_Control_IsRunning()) {
+            APP_Control_Run();
+        }
     }
 }

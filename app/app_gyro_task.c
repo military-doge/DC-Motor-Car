@@ -41,16 +41,16 @@
 #define GYRO_TASK_ALIGN_THRESHOLD 3.0f    /* Angle alignment tolerance (°) */
 
 /*
- * Distance per encoder pulse:
- *   perimeter = 0.2104867 m
- *   pulses/rev = 13 lines * 2 (quadrature) * 20 (gear ratio) = 520
- *   distance_per_pulse = 0.2104867 / 520 ≈ 0.00040478 m
+ * Distance per encoder pulse (calibrated):
+ *   perimeter = 0.2042 m
+ *   pulses/rev = 25525 (calibrated, includes gear ratio & 2x decoding)
+ *   distance_per_pulse = 0.2042 / 25525 ≈ 0.00000800 m
  *
- * For 128 cm: target_pulses = 1.28 / 0.00040478 ≈ 3162 (per wheel)
- * Use sum of both wheels: ~6324 total pulses
+ * For 128 cm: target_pulses = 1.28 / 0.00000800 ≈ 160000 (per wheel)
+ * Use sum of both wheels: ~320000 total pulses
  */
-#define GYRO_TASK_PERIMETER       0.2104867f
-#define GYRO_TASK_PULSES_PER_REV  520
+#define GYRO_TASK_PERIMETER       0.2042f
+#define GYRO_TASK_PULSES_PER_REV  25525
 #define GYRO_TASK_DRIVE_DIST_M    1.28f
 #define GYRO_TASK_TARGET_PULSES   ((int32_t)(GYRO_TASK_DRIVE_DIST_M / \
     (GYRO_TASK_PERIMETER / GYRO_TASK_PULSES_PER_REV) * 2.0f))

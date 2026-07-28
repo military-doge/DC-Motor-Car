@@ -49,20 +49,26 @@ void GROUP1_IRQHandler(void)
 {
     uint32_t status_a, status_b;
 
-    /* Read pending interrupt status for each encoder port */
+    /* Read and immediately clear pending interrupt status.
+     * Clearing first ensures that any new edge arriving during
+     * processing will latch a new interrupt — no lost pulses. */
     status_a = DL_GPIO_getEnabledInterruptStatus(ENCODERA_PORT,
         ENCODERA_E1A_PIN | ENCODERA_E1B_PIN);
     status_b = DL_GPIO_getEnabledInterruptStatus(ENCODERB_PORT,
         ENCODERB_E2A_PIN | ENCODERB_E2B_PIN);
+    DL_GPIO_clearInterruptStatus(ENCODERA_PORT, status_a);
+    DL_GPIO_clearInterruptStatus(ENCODERB_PORT, status_b);
 
-    /* Encoder A: 2x quadrature decoding */
+    /* Encoder A: 2x quadrature decoding (if-if handles both edges
+     * when they fire simultaneously, not else-if which drops one) */
     if (status_a & ENCODERA_E1A_PIN) {
         if (!DL_GPIO_readPins(ENCODERA_PORT, ENCODERA_E1B_PIN)) {
             s_count_a--;
         } else {
             s_count_a++;
         }
-    } else if (status_a & ENCODERA_E1B_PIN) {
+    }
+    if (status_a & ENCODERA_E1B_PIN) {
         if (!DL_GPIO_readPins(ENCODERA_PORT, ENCODERA_E1A_PIN)) {
             s_count_a++;
         } else {
@@ -77,17 +83,12 @@ void GROUP1_IRQHandler(void)
         } else {
             s_count_b++;
         }
-    } else if (status_b & ENCODERB_E2B_PIN) {
+    }
+    if (status_b & ENCODERB_E2B_PIN) {
         if (!DL_GPIO_readPins(ENCODERB_PORT, ENCODERB_E2A_PIN)) {
             s_count_b++;
         } else {
             s_count_b--;
         }
     }
-
-    /* Clear interrupt flags for both ports */
-    DL_GPIO_clearInterruptStatus(ENCODERA_PORT,
-        ENCODERA_E1A_PIN | ENCODERA_E1B_PIN);
-    DL_GPIO_clearInterruptStatus(ENCODERB_PORT,
-        ENCODERB_E2A_PIN | ENCODERB_E2B_PIN);
 }
