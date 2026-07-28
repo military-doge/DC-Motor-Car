@@ -44,7 +44,7 @@ static volatile uint32_t s_calib_pulses_a = 0;
 static volatile uint32_t s_calib_pulses_b = 0;
 static volatile bool     s_calib_done     = false;
 
-/* ---- Direct drive mode (BLE !START) ---- */
+/* ---- Direct drive mode (BLE !DRIVE) ---- */
 static volatile bool   s_direct_mode  = false;
 static volatile float  s_direct_speed = 0.0f;
 
@@ -198,7 +198,7 @@ void APP_Control_TimerTick(void)
                     BSP_Motor_Stop();
                 }
             } else if (s_direct_mode) {
-                /* Direct drive mode (!START): both wheels at same speed */
+                /* Direct drive mode (!DRIVE): both wheels at same speed */
                 left_tgt  = s_direct_speed;
                 right_tgt = s_direct_speed;
             } else {

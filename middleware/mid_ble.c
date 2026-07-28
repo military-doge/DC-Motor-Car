@@ -227,8 +227,8 @@ static void ble_spd_task_poll(void)
     }
 }
 
-/* !START <speed> — 直行启动 (BLE direct drive) */
-static void ble_handle_start_command(const char *cmd)
+/* !DRIVE <speed> — 设置速度直行 (BLE direct drive) */
+static void ble_handle_drive_command(const char *cmd)
 {
     float speed = 0.10f;
     const char *p = cmd + 6;
@@ -240,7 +240,7 @@ static void ble_handle_start_command(const char *cmd)
     if (speed > 0.80f)  speed = 0.80f;
 
     APP_Control_StartDirect(speed);
-    BSP_UART_SendString("OK START speed:");
+    BSP_UART_SendString("OK DRIVE speed:");
     ble_uart_send_float(speed, 2);
     BSP_UART_SendString("m/s\r\n");
 }
@@ -263,18 +263,18 @@ static void ble_dispatch_command(void)
         ble_handle_spd_command((const char *)s_line_buf);
         return;
     }
-    /* !STOP (check before !START to avoid ambiguity) */
+    /* !DRIVE */
+    if (s_line_len >= 6 &&
+        s_line_buf[1] == 'D' && s_line_buf[2] == 'R' &&
+        s_line_buf[3] == 'I') {
+        ble_handle_drive_command((const char *)s_line_buf);
+        return;
+    }
+    /* !STOP */
     if (s_line_len >= 5 &&
         s_line_buf[1] == 'S' && s_line_buf[2] == 'T' &&
         s_line_buf[3] == 'O') {
         ble_handle_stop_command();
-        return;
-    }
-    /* !START */
-    if (s_line_len >= 6 &&
-        s_line_buf[1] == 'S' && s_line_buf[2] == 'T' &&
-        s_line_buf[3] == 'A') {
-        ble_handle_start_command((const char *)s_line_buf);
         return;
     }
     BSP_UART_SendString("?CMD\r\n");
