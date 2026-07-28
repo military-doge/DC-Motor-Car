@@ -463,6 +463,88 @@ AI（包括本 AI 及后续 vibe coding 中的 AI）完成代码后，**必须�
 3. 双击 `apply_sdk_paths.bat` 同步路径到 `.uvprojx`
 4. 打开 Keil 编译
 
+## 调参参考 (Tuning Reference)
+
+### 硬件参数
+
+| 参数 | 数值 |
+|------|------|
+| MCU | TI MSPM0G3507 (Cortex-M0+) |
+| 轮径 (Wheel Diameter) | 65mm → 周长 204.2mm |
+| 轴距 (Wheelbase) | 0.21m (210mm) |
+| 减速比 (Gear Ratio) | 28:1 |
+| 编码器 (Encoder) | 500 线 × 2x 倍频 = 1000 脉冲/电机圈 × 28:1 减速比 |
+| 灰度传感器 | 8 路数字 (0/1) |
+| 控制频率 | 100Hz (10ms 定时器) |
+| 电机驱动 | TB6612 双路 H 桥 PWM |
+
+### 编码器校准值 (实测)
+
+| 参数 | 数值 |
+|------|------|
+| 轮子每圈脉冲数 | **25525** pulses/rev（实测） |
+| 每脉冲距离 | 0.008000 mm/pulse |
+| 理论值 | 500 × 2 × 28 = 28000（与实际偏差 ~8.8%） |
+
+> 校准方法：上电后在 OLED 上观察 Enc A/B 累计脉冲，手动转动轮子恰好一圈，读取脉冲差值。
+> 该值已用于 `app_control.c`、`app_gyro_task.c` 的距离计算。
+
+### 速度闭环 PI (app_control.c)
+
+| 参数 | 数值 | 说明 |
+|------|------|------|
+| KP | 1225 | 增量式离散 PI |
+| KI | 3600 | |
+
+```
+pwm += KP × (bias - last_bias) + KI × bias
+```
+
+### 灰度循线 PD (mid_line_track.c)
+
+**全局参数：**
+
+| 参数 | 数值 | 说明 |
+|------|------|------|
+| `MID_TRACK_BASE_SPEED` | 0.50 m/s | 直行速度 |
+| `MID_TRACK_LEFT_BIAS` | 0.02 | 左转死区补偿 |
+| `MID_TRACK_SEARCH_SPEED` | 0.28 m/s | 丢线搜索速度 |
+| `MID_TRACK_SEARCH_KP` | 0.038 | 丢线搜索比例增益 |
+| `MID_TRACK_SEARCH_CAP` | 6 | 丢线误差限幅 |
+
+**传感器权重 (s_track_weights):**
+
+```
+[-10, -6, -3, -1, 1, 3, 6, 10]
+```
+
+**PD 查表 (按 |error| 索引)：**
+
+| \|error\| | attenuation | KP | KD | 转弯半径 R |
+|-----------|------------|------|------|-----------|
+| 0 | 1.00 | 0.0058 | 0.0040 | ∞ (直行) |
+| 1 | 0.95 | 0.0090 | 0.006  | ~5.5m |
+| 2 | 0.82 | 0.0144 | 0.009  | ~1.5m |
+| 3 | 0.62 | 0.0140 | 0.009  | ~0.78m |
+| 4 | 0.47 | 0.0114 | 0.007  | ~0.54m |
+| 5 | 0.37 | 0.0090 | 0.006  | ~0.43m |
+| 6 | 0.28 | 0.0148 | 0.0095 | ~0.17m |
+| 7 | 0.22 | 0.0132 | 0.009  | ~0.13m |
+
+> 算法：`error = Σ(w[i] × sensor[i]) / Σ(sensor[i])`
+>
+> `base_speed = BASE_SPEED × attenuation[|error|]`
+>
+> `correction = KP[|error|] × error + KD[|error|] × d(error)/dt`
+>
+> `left = base_speed + correction`, `right = base_speed - correction`
+>
+> 转弯半径：`R = base_speed × 0.21 / (2 × KP × |error|)`（忽略 KD 项稳态近似）
+
+**丢线行为：**
+- 全白 (total_intensity < 1) → 向 `s_last_valid_error` 方向搜索
+- 全黑 (8 路全触发) → 直行
+
 ## 后续计划
 
 ### 2.0 上半 — 控制优化与调试工具链
