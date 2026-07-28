@@ -6,14 +6,17 @@
 #include "bsp_led.h"
 #include "mid_oled.h"
 #include "mid_line_track.h"
+#include "mid_jy62.h"
+#include "mid_gyro_hold.h"
 #include "app_gyro_task.h"
 
 /* ---- Physical constants ---- */
 #define CONTROL_FREQ             100.0f
-#define CONTROL_PERIMETER        0.2104867f
-#define CONTROL_ENCODER_LINES    13
+#define CONTROL_PERIMETER        0.2042f
+#define CONTROL_ENCODER_LINES    500
 #define CONTROL_MULTIPLY_FACTOR  2
-#define CONTROL_GEAR_RATIO       20
+#define CONTROL_GEAR_RATIO       28
+#define CONTROL_PULSES_PER_REV   25525
 #define CONTROL_SPEED_ALPHA      0.4f
 #define CONTROL_DEADBAND         0.005f
 #define CONTROL_PWM_MAX          7800
@@ -33,6 +36,14 @@ static volatile motor_speed_t s_motor_right;
 static volatile bool s_flag_stop = true;
 static volatile uint32_t s_display_tick = 0;
 static volatile uint16_t s_sensor_data[BSP_GRAYSCALE_CHANNELS];
+
+/* ---- Encoder calibration state ---- */
+static volatile bool s_calib_mode = false;
+static volatile uint32_t s_calib_pulses_a = 0;
+static volatile uint32_t s_calib_pulses_b = 0;
+static volatile bool s_calib_done = false;
+#define CONTROL_CALIB_SPEED   0.10f   /* slow speed for calibration (m/s) */
+#define CONTROL_CALIB_PULSES  125000  /* encoder pulses for 1 meter */
 
 /* ---- PI controller state (one set per motor) ---- */
 static float s_last_bias_left;
@@ -70,10 +81,9 @@ static int16_t control_pi_update(float current, float target, float *last_bias,
 /* ---- Speed calculation: encoder counts to m/s with low-pass filter ---- */
 static float control_calc_speed(int16_t encoder_count)
 {
-    /* raw_speed = counts * Freq * Perimeter / (LINES * MULTIPLY * GEAR_RATIO) */
+    /* raw_speed = counts * Freq * Perimeter / PulsesPerRev (calibrated) */
     float raw_speed = (float)encoder_count * CONTROL_FREQ * CONTROL_PERIMETER
-        / ((float)CONTROL_ENCODER_LINES * CONTROL_MULTIPLY_FACTOR
-           * CONTROL_GEAR_RATIO);
+        / (float)CONTROL_PULSES_PER_REV;
 
     return raw_speed;
 }
@@ -112,7 +122,17 @@ void APP_Control_TimerTick(void)
     int16_t pwm_a, pwm_b;
     uint16_t raw_sensor[BSP_GRAYSCALE_CHANNELS];
 
-    /* 0. Read grayscale sensor (always, for display) */
+    /* 0. LED: blink when running, solid on when stopped */
+    if (s_flag_stop) {
+        BSP_LED_Flash(0);
+    } else {
+        BSP_LED_Flash(100);
+    }
+
+    /* 1. Key scan (same as demo: Key() called before anything else) */
+    BSP_Key_Scan();
+
+    /* 2. Read grayscale sensor */
     BSP_Grayscale_ReadAll(raw_sensor);
 
     /* 1. Read and reset encoder counts */
@@ -128,8 +148,39 @@ void APP_Control_TimerTick(void)
     control_lowpass_filter(raw_a, &s_motor_left.current_speed);
     control_lowpass_filter(raw_b, &s_motor_right.current_speed);
 
+    /* Calibration mode: accumulate encoder pulses until 1 meter traveled,
+     * with gyro heading hold to drive straight. */
+    if (s_calib_mode) {
+        float correction;
+
+        s_calib_pulses_a += (count_a > 0) ? count_a : 0;
+        s_calib_pulses_b += (count_b > 0) ? count_b : 0;
+
+        if (s_calib_pulses_a >= CONTROL_CALIB_PULSES ||
+            s_calib_pulses_b >= CONTROL_CALIB_PULSES) {
+            /* 1 meter complete: stop immediately */
+            s_calib_done = true;
+            s_calib_mode = false;
+            s_flag_stop = true;
+            MID_GyroHold_Clear();
+            BSP_Motor_Stop();
+        } else {
+            /* Drive straight with gyro hold correction */
+            correction = MID_GyroHold_GetCorrection();
+            s_motor_left.target_speed  = CONTROL_CALIB_SPEED + correction;
+            s_motor_right.target_speed = CONTROL_CALIB_SPEED - correction;
+            pwm_a = control_pi_update(s_motor_left.current_speed,
+                s_motor_left.target_speed, &s_last_bias_left,
+                &s_motor_left.pwm_output);
+            pwm_b = control_pi_update(s_motor_right.current_speed,
+                s_motor_right.target_speed, &s_last_bias_right,
+                &s_motor_right.pwm_output);
+            BSP_Motor_SetPWM(pwm_a, pwm_b);
+        }
+    }
+
     /* 4. Set target speeds based on mode */
-    {
+    if (!s_calib_mode) {
         bool gyro_active = (APP_GyroTask_GetState() != APP_GYRO_TASK_IDLE);
 
         if (gyro_active || !s_flag_stop) {
@@ -161,8 +212,8 @@ void APP_Control_TimerTick(void)
         s_sensor_data[i] = raw_sensor[i];
     }
 
-    /* 5. PI control and PWM output (skip when stopped) */
-    if (!s_flag_stop) {
+    /* 5. PI control and PWM output (skip when stopped or calibrating) */
+    if (!s_flag_stop && !s_calib_mode) {
         pwm_a = control_pi_update(s_motor_left.current_speed,
             s_motor_left.target_speed, &s_last_bias_left,
             &s_motor_left.pwm_output);
@@ -171,12 +222,6 @@ void APP_Control_TimerTick(void)
             &s_motor_right.pwm_output);
         BSP_Motor_SetPWM(pwm_a, pwm_b);
     }
-
-    /* 6. LED blink (100 ticks = 1 second period) */
-    BSP_LED_Flash(100);
-
-    /* 7. Key scan (needs 10ms precise timing) */
-    BSP_Key_Scan();
 
     s_display_tick++;
 }
@@ -215,7 +260,38 @@ void APP_Control_Run(void)
 
     MID_OLED_Clear();
 
-    if (s_flag_stop) {
+    if (s_calib_done) {
+        /* Calibration result screen */
+        MID_OLED_ShowString(0, 0, "CALIB DONE", 12);
+        MID_OLED_ShowString(0, 16, "A:", 12);
+        MID_OLED_ShowNumber(18, 16, s_calib_pulses_a, 5, 12);
+        MID_OLED_ShowString(0, 32, "B:", 12);
+        MID_OLED_ShowNumber(18, 32, s_calib_pulses_b, 5, 12);
+    } else if (s_calib_mode) {
+        /* Calibration in progress */
+        uint32_t pct = (s_calib_pulses_a * 100UL) / CONTROL_CALIB_PULSES;
+        float yaw_err = MID_GyroHold_GetError();
+
+        MID_OLED_ShowString(0, 0, "CALIB 1M", 12);
+        /* Progress: "NN%" */
+        MID_OLED_ShowNumber(72, 0, pct, 2, 12);
+        MID_OLED_ShowString(90, 0, "%", 12);
+        /* Yaw error */
+        MID_OLED_ShowString(0, 16, "Y:", 12);
+        if (yaw_err < 0) {
+            MID_OLED_ShowString(12, 16, "-", 12);
+            MID_OLED_ShowNumber(18, 16, (uint32_t)(-yaw_err), 3, 12);
+        } else {
+            MID_OLED_ShowString(12, 16, "+", 12);
+            MID_OLED_ShowNumber(18, 16, (uint32_t)yaw_err, 3, 12);
+        }
+        /* Pulse count A */
+        MID_OLED_ShowString(0, 32, "A:", 12);
+        MID_OLED_ShowNumber(18, 32, s_calib_pulses_a, 5, 12);
+        /* Pulse count B */
+        MID_OLED_ShowString(0, 44, "B:", 12);
+        MID_OLED_ShowNumber(18, 44, s_calib_pulses_b, 5, 12);
+    } else if (s_flag_stop) {
         /* STOP screen */
         MID_OLED_ShowString(48, 24, "STOP", 12);
     } else if (APP_GyroTask_GetState() != APP_GYRO_TASK_IDLE) {
@@ -300,7 +376,7 @@ void APP_Control_ToggleStartStop(void)
 
 bool APP_Control_IsRunning(void)
 {
-    return !s_flag_stop;
+    return (!s_flag_stop) || s_calib_done;
 }
 
 float APP_Control_GetSpeedA(void)
@@ -311,4 +387,20 @@ float APP_Control_GetSpeedA(void)
 float APP_Control_GetSpeedB(void)
 {
     return s_motor_right.current_speed;
+}
+
+void APP_Control_StartCalibration(void)
+{
+    s_calib_mode = true;
+    s_calib_done = false;
+    s_calib_pulses_a = 0;
+    s_calib_pulses_b = 0;
+    s_flag_stop = false;
+    s_last_bias_left  = 0.0f;
+    s_last_bias_right = 0.0f;
+    s_motor_left.pwm_output  = 0.0f;
+    s_motor_right.pwm_output = 0.0f;
+
+    /* Lock current heading for straight-line gyro hold */
+    MID_GyroHold_SetReference();
 }

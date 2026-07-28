@@ -11,5 +11,5 @@ void APP_Control_ToggleStartStop(void);
 bool APP_Control_IsRunning(void);
 float APP_Control_GetSpeedA(void);
 float APP_Control_GetSpeedB(void);
-
+void APP_Control_StartCalibration(void);
 #endif /* APP_CONTROL_H */

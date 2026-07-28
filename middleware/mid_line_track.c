@@ -45,44 +45,45 @@
  *   s_kp_table   — proportional gain, from desktop tuned values
  *   s_kd_table   — derivative gain, from desktop tuned values */
 #define MID_TRACK_TBL_SIZE        8
-#define MID_TRACK_BASE_SPEED      0.25f   /* straight-line speed (m/s) */
+#define MID_TRACK_BASE_SPEED      0.50f   /* straight-line speed (m/s) */
 
 static const float s_attenuation_table[MID_TRACK_TBL_SIZE] = {
     1.00f,    /* err=0  — 100%  (straight)    */
-    0.92f,    /* err=1  — 92.0%               */
-    0.76f,    /* err=2  — 76.0%               */
-    0.58f,    /* err=3  — 58.0%               */
-    0.44f,    /* err=4  — 44.0%               */
-    0.34f,    /* err=5  — 34.0%               */
-    0.26f,    /* err=6  — 26.0%               */
-    0.20f,    /* err=7  — 20.0%               */
+    0.95f,    /* err=1  — 95.0%               */
+    0.82f,    /* err=2  — 82.0%               */
+    0.62f,    /* err=3  — 62.0%               */
+    0.47f,    /* err=4  — 47.0%               */
+    0.37f,    /* err=5  — 37.0%               */
+    0.28f,    /* err=6  — 28.0%               */
+    0.22f,    /* err=7  — 22.0%               */
 };
 static const float s_kp_table[MID_TRACK_TBL_SIZE] = {
-    [0] = 0.0065f, [1] = 0.0100f, [2] = 0.0105f, [3] = 0.0105f,
-    [4] = 0.0104f, [5] = 0.0041f, [6] = 0.0140f, [7] = 0.0120f,
+    [0] = 0.0058f, [1] = 0.0090f, [2] = 0.0144f, [3] = 0.0140f,
+    [4] = 0.0114f, [5] = 0.0090f, [6] = 0.0148f, [7] = 0.0132f,
 };
 static const float s_kd_table[MID_TRACK_TBL_SIZE] = {
-    [0] = 0.0016f, [1] = 0.0025f, [2] = 0.0008f, [3] = 0.0026f,
-    [4] = 0.0025f, [5] = 0.0010f, [6] = 0.0035f, [7] = 0.0030f,
+    [0] = 0.0040f, [1] = 0.0060f, [2] = 0.0090f, [3] = 0.0090f,
+    [4] = 0.0070f, [5] = 0.0060f, [6] = 0.0095f, [7] = 0.0090f,
 };
 
 /* 8-channel sensor weights (asymmetric, left-to-right) */
-#define MID_TRACK_W0  (-7)
-#define MID_TRACK_W1  (-5)
+#define MID_TRACK_W0  (-10)
+#define MID_TRACK_W1  (-6)
 #define MID_TRACK_W2  (-3)
 #define MID_TRACK_W3  (-1)
 #define MID_TRACK_W4  (1)
 #define MID_TRACK_W5  (3)
-#define MID_TRACK_W6  (5)
-#define MID_TRACK_W7  (7)
+#define MID_TRACK_W6  (6)
+#define MID_TRACK_W7  (10)
 
 static const int8_t s_track_weights[8] = {
     MID_TRACK_W0, MID_TRACK_W1, MID_TRACK_W2, MID_TRACK_W3,
     MID_TRACK_W4, MID_TRACK_W5, MID_TRACK_W6, MID_TRACK_W7
 };
 
-#define MID_TRACK_SEARCH_SPEED  0.15f
-#define MID_TRACK_SEARCH_KP     0.025f
+#define MID_TRACK_SEARCH_SPEED  0.28f
+#define MID_TRACK_SEARCH_KP     0.038f
+#define MID_TRACK_SEARCH_CAP    6
 
 /* ---- Control state ---- */
 static int8_t s_line_error       = 0;
@@ -154,7 +155,7 @@ void MID_LineTrack_Update(const uint16_t sensor_data[8],
         if (s_last_valid_error != 0) {
             int dir = (s_last_valid_error > 0) ? 1 : -1;
             int mag = (s_last_valid_error > 0) ? s_last_valid_error : -s_last_valid_error;
-            if (mag > 3) mag = 3;
+            if (mag > MID_TRACK_SEARCH_CAP) mag = MID_TRACK_SEARCH_CAP;
             float search_correction = MID_TRACK_SEARCH_KP * (float)(dir * mag);
             *out_left_speed  = MID_TRACK_SEARCH_SPEED + search_correction;
             *out_right_speed = MID_TRACK_SEARCH_SPEED - search_correction;
