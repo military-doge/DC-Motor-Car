@@ -17,12 +17,23 @@
 #define CONTROL_SPEED_ALPHA      0.4f
 #define CONTROL_DEADBAND         0.005f
 #define CONTROL_PWM_MAX          7800
-#define CONTROL_PID_KP           600.0f
-#define CONTROL_PID_KI           450.0f
+
+/* ---- PI runtime parameters (adjustable via BLE !PID) ---- */
+static float s_pid_kp = 1225.0f;
+static float s_pid_ki = 3600.0f;
 
 /* ---- Calibration constants ---- */
 #define CONTROL_CALIB_SPEED   0.10f   /* slow speed for calibration (m/s) */
 #define CONTROL_CALIB_PULSES  125000  /* encoder pulses for 1 meter */
+
+/* ---- Sweep profile constants (BLE !SWP) ---- */
+#define SWEEP_ACCEL_TICKS   100     /* 1s accelerate at 10ms tick */
+#define SWEEP_HOLD_TICKS    200     /* 2s constant speed */
+#define SWEEP_DECEL_TICKS   100     /* 1s decelerate */
+#define SWEEP_TARGET_SPEED  0.30f   /* m/s */
+#define SWEEP_SAMPLE_DIV    5       /* record every 5 ticks = 50ms */
+#define SWEEP_MAX_SAMPLES   100
+#define SWEEP_SCALE         1000    /* store speeds as mm/s (int16_t) */
 
 /* ---- Motor speed state ---- */
 typedef struct {
@@ -47,6 +58,15 @@ static volatile bool     s_calib_done     = false;
 /* ---- Direct drive mode (BLE !DRIVE) ---- */
 static volatile bool   s_direct_mode  = false;
 static volatile float  s_direct_speed = 0.0f;
+
+/* ---- Sweep test state (BLE !SWP) ---- */
+static volatile bool      s_sweep_active   = false;
+static volatile bool      s_sweep_done     = false;
+static uint16_t           s_sweep_tick;
+static uint16_t           s_sweep_count;
+static int16_t            s_sweep_target[SWEEP_MAX_SAMPLES];
+static int16_t            s_sweep_actual_l[SWEEP_MAX_SAMPLES];
+static int16_t            s_sweep_actual_r[SWEEP_MAX_SAMPLES];
 
 /* ---- PI controller state (one set per motor) ---- */
 static float s_last_bias_left;
@@ -74,7 +94,7 @@ static int16_t control_pi_update(float current, float target, float *last_bias,
     }
 
     /* Incremental PI: pwm += Kp * [e(k) - e(k-1)] + Ki * e(k) */
-    *pwm += CONTROL_PID_KP * (bias - *last_bias) + CONTROL_PID_KI * bias;
+    *pwm += s_pid_kp * (bias - *last_bias) + s_pid_ki * bias;
     *last_bias = bias;
     *pwm = control_pwm_limit(*pwm, (float)(-CONTROL_PWM_MAX), (float)CONTROL_PWM_MAX);
 
@@ -111,6 +131,8 @@ void APP_Control_Init(void)
     s_last_bias_left  = 0.0f;
     s_last_bias_right = 0.0f;
     s_display_tick = 0;
+    s_pid_kp = 1225.0f;
+    s_pid_ki = 3600.0f;
 }
 
 /*
@@ -197,6 +219,42 @@ void APP_Control_TimerTick(void)
                     s_flag_stop = true;
                     BSP_Motor_Stop();
                 }
+            } else if (s_sweep_active) {
+                /* Sweep test mode (!SWP): trapezoidal speed profile */
+                uint16_t total_ticks = SWEEP_ACCEL_TICKS + SWEEP_HOLD_TICKS + SWEEP_DECEL_TICKS;
+                float target;
+
+                if (s_sweep_tick < SWEEP_ACCEL_TICKS) {
+                    /* Accelerating: 0 → target speed */
+                    target = SWEEP_TARGET_SPEED * (float)s_sweep_tick / (float)SWEEP_ACCEL_TICKS;
+                } else if (s_sweep_tick < SWEEP_ACCEL_TICKS + SWEEP_HOLD_TICKS) {
+                    /* Holding at target speed */
+                    target = SWEEP_TARGET_SPEED;
+                } else if (s_sweep_tick < total_ticks) {
+                    /* Decelerating: target speed → 0 */
+                    uint16_t decel_tick = s_sweep_tick - SWEEP_ACCEL_TICKS - SWEEP_HOLD_TICKS;
+                    target = SWEEP_TARGET_SPEED * (float)(SWEEP_DECEL_TICKS - decel_tick) / (float)SWEEP_DECEL_TICKS;
+                } else {
+                    /* Profile complete */
+                    target = 0.0f;
+                    s_sweep_active = false;
+                    s_sweep_done   = true;
+                    s_flag_stop    = true;
+                    BSP_Motor_Stop();
+                }
+
+                left_tgt  = target;
+                right_tgt = target;
+
+                /* Record sample */
+                if (s_sweep_active && (s_sweep_tick % SWEEP_SAMPLE_DIV == 0)
+                    && s_sweep_count < SWEEP_MAX_SAMPLES) {
+                    s_sweep_target[s_sweep_count]  = (int16_t)(target * SWEEP_SCALE);
+                    s_sweep_actual_l[s_sweep_count] = (int16_t)(s_motor_left.current_speed * SWEEP_SCALE);
+                    s_sweep_actual_r[s_sweep_count] = (int16_t)(s_motor_right.current_speed * SWEEP_SCALE);
+                    s_sweep_count++;
+                }
+                s_sweep_tick++;
             } else if (s_direct_mode) {
                 /* Direct drive mode (!DRIVE): both wheels at same speed */
                 left_tgt  = s_direct_speed;
@@ -414,6 +472,70 @@ void APP_Control_StopDirect(void)
     s_motor_left.target_speed  = 0.0f;
     s_motor_right.target_speed = 0.0f;
     BSP_Motor_Stop();
+}
+
+void APP_Control_StartSweep(float kp, float ki)
+{
+    /* Set PI parameters for the sweep */
+    APP_Control_SetPID(kp, ki);
+
+    /* Reset sweep state */
+    s_sweep_active = false;
+    s_sweep_done   = false;
+    s_sweep_tick   = 0;
+    s_sweep_count  = 0;
+
+    /* Reset PI state for clean start */
+    s_last_bias_left  = 0.0f;
+    s_last_bias_right = 0.0f;
+    s_motor_left.pwm_output  = 0.0f;
+    s_motor_right.pwm_output = 0.0f;
+
+    s_flag_stop    = false;
+    s_sweep_active = true;
+}
+
+bool APP_Control_IsSweepDone(void)
+{
+    bool done = s_sweep_done;
+    s_sweep_done = false;  /* Clear after read */
+    return done;
+}
+
+uint16_t APP_Control_GetSweepCount(void)
+{
+    return s_sweep_count;
+}
+
+int16_t *APP_Control_GetSweepTarget(void)
+{
+    return s_sweep_target;
+}
+
+int16_t *APP_Control_GetSweepActualL(void)
+{
+    return s_sweep_actual_l;
+}
+
+int16_t *APP_Control_GetSweepActualR(void)
+{
+    return s_sweep_actual_r;
+}
+
+void APP_Control_SetPID(float kp, float ki)
+{
+    if (kp < 0.0f)  kp = 0.0f;
+    if (kp > 5000.0f) kp = 5000.0f;
+    if (ki < 0.0f)  ki = 0.0f;
+    if (ki > 5000.0f) ki = 5000.0f;
+    s_pid_kp = kp;
+    s_pid_ki = ki;
+}
+
+void APP_Control_GetPID(float *kp, float *ki)
+{
+    *kp = s_pid_kp;
+    *ki = s_pid_ki;
 }
 
 float APP_Control_GetSpeedA(void)

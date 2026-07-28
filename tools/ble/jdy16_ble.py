@@ -16,6 +16,8 @@ MCU 指令集:
        例: !SPD 3000 50 save 每50ms读一次，结束后保存到 log/*.csv
   !DRIVE [speed]          - 设置速度直行 (speed: 0.05-0.80 m/s, 默认 0.10)
   !STOP                   - 停止
+  !SWP <kp> <ki>          - PI 参数扫频测试 (加速→匀速→减速→绘图)
+  !PID <kp> <ki>          - 设置 PI 参数 (或 !PID ? 查询)
 
 内置命令:
   .scan            - 重新扫描 BLE 设备
@@ -64,6 +66,12 @@ g_notify_queue: asyncio.Queue = asyncio.Queue()
 g_spd_recording: bool = False
 g_spd_samples: list = []
 g_spd_interval_ms: int = 0
+
+# SWP 录制 (扫频)
+g_swp_recording: bool = False
+g_swp_data: list = []  # [(target, actual_l, actual_r), ...]
+g_swp_kp: float = 0.0
+g_swp_ki: float = 0.0
 
 # 行缓冲 (处理 BLE 通知分包)
 g_line_buf: str = ""
@@ -127,6 +135,60 @@ def save_spd_csv():
     g_spd_recording = False
     g_spd_samples = []
     g_spd_interval_ms = 0
+
+
+def save_swp_plot():
+    """Plot SWP data with matplotlib and save as PNG."""
+    global g_swp_recording, g_swp_data, g_swp_kp, g_swp_ki
+
+    if not g_swp_data:
+        print("\n[!] 没有扫频数据可绘图")
+        g_swp_recording = False
+        return
+
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("\n[!] 未安装 matplotlib，跳过绘图。安装: pip install matplotlib")
+        g_swp_recording = False
+        g_swp_data = []
+        return
+
+    targets = [d[0] for d in g_swp_data]
+    actuals_l = [d[1] for d in g_swp_data]
+    actuals_r = [d[2] for d in g_swp_data]
+    sample_count = len(targets)
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(targets, 'b-', label='Target Speed', linewidth=2)
+    plt.plot(actuals_l, 'r-', label='Actual Left', linewidth=1.5)
+    plt.plot(actuals_r, 'g--', label='Actual Right', linewidth=1.5)
+    plt.xlabel('Sample (50ms interval)')
+    plt.ylabel('Speed (m/s)')
+    plt.title('PI Sweep Test: Target vs Actual Speed')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    filename = f"swp_{int(g_swp_kp)}_{int(g_swp_ki)}.png"
+    filepath = os.path.join(LOG_DIR, filename)
+
+    os.makedirs(LOG_DIR, exist_ok=True)
+    plt.savefig(filepath, dpi=150, bbox_inches='tight')
+    print(f"\n[√] 扫频图已保存: {filepath}")
+    print(f"    采样点数: {sample_count}")
+
+    # Also show interactive plot if running in GUI environment
+    try:
+        matplotlib.use('TkAgg')
+        plt.show()
+    except Exception:
+        pass
+
+    plt.close()
+    g_swp_recording = False
+    g_swp_data = []
 
 
 def start_spd_recording(cmd: str):
@@ -322,6 +384,16 @@ async def send_command(cmd: str) -> None:
 
     if cmd.upper().startswith("!SPD"):
         start_spd_recording(cmd)
+    elif cmd.upper().startswith("!SWP"):
+        global g_swp_recording, g_swp_data, g_swp_kp, g_swp_ki
+        parts = cmd.upper().replace("!SWP", "").strip().split()
+        try:
+            g_swp_kp = float(parts[0]) if len(parts) > 0 else 600.0
+            g_swp_ki = float(parts[1]) if len(parts) > 1 else 450.0
+        except (ValueError, IndexError):
+            g_swp_kp, g_swp_ki = 600.0, 450.0
+        g_swp_recording = True
+        g_swp_data = []
 
     data = (cmd + "\r\n").encode("utf-8")
     try:
@@ -335,7 +407,7 @@ async def send_command(cmd: str) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def notification_printer():
-    global g_line_buf, g_spd_recording, g_spd_samples
+    global g_line_buf, g_spd_recording, g_spd_samples, g_swp_recording, g_swp_data
 
     while True:
         data = await g_notify_queue.get()
@@ -364,6 +436,21 @@ async def notification_printer():
             if g_spd_recording and line == "SPD_DONE":
                 save_spd_csv()
 
+            if g_swp_recording and line.startswith("SWP:") and line != "SWP_DONE":
+                content = line[4:]
+                parts = content.split(",")
+                if len(parts) == 3:
+                    try:
+                        target   = float(parts[0].strip()) / 1000.0
+                        actual_l = float(parts[1].strip()) / 1000.0
+                        actual_r = float(parts[2].strip()) / 1000.0
+                        g_swp_data.append((target, actual_l, actual_r))
+                    except ValueError:
+                        pass
+
+            if g_swp_recording and line == "SWP_DONE":
+                save_swp_plot()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 帮助与信息
@@ -391,6 +478,8 @@ def print_help():
 ║         例: !SPD 3000 50 save  采集后保存到 log/spd_*.csv             ║
 ║    !DRIVE [speed]          设置速度直行 (speed: 0.05-0.80, 默认0.10)       ║
 ║    !STOP                   停止                                       ║
+║    !SWP <kp> <ki>          PI 参数扫频 (加速→匀速→减速→绘图)              ║
+║    !PID <kp> <ki>          设置 PI 参数 (或 !PID ? 查询)                  ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """)
 

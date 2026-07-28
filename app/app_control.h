@@ -12,6 +12,14 @@ bool APP_Control_IsRunning(void);
 void APP_Control_StartCalibration(void);
 void APP_Control_StartDirect(float speed_mps);
 void APP_Control_StopDirect(void);
+void APP_Control_StartSweep(float kp, float ki);
+bool APP_Control_IsSweepDone(void);
+uint16_t APP_Control_GetSweepCount(void);
+int16_t *APP_Control_GetSweepTarget(void);
+int16_t *APP_Control_GetSweepActualL(void);
+int16_t *APP_Control_GetSweepActualR(void);
+void APP_Control_SetPID(float kp, float ki);
+void APP_Control_GetPID(float *kp, float *ki);
 float APP_Control_GetSpeedA(void);
 float APP_Control_GetSpeedB(void);
 

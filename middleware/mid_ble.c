@@ -245,11 +245,65 @@ static void ble_handle_drive_command(const char *cmd)
     BSP_UART_SendString("m/s\r\n");
 }
 
+/* !SWP <kp> <ki> — 速度扫频测试 */
+static void ble_handle_swp_command(const char *cmd)
+{
+    float kp = 1225.0f, ki = 3600.0f;
+    const char *p = cmd + 4;
+    while (*p == ' ') p++;
+    kp = (float)atof(p);
+    while ((*p >= '0' && *p <= '9') || *p == '.' || *p == '-') p++;
+    while (*p == ' ') p++;
+    ki = (float)atof(p);
+
+    APP_Control_StartSweep(kp, ki);
+    BSP_UART_SendString("OK SWP kp:");
+    ble_uart_send_float(kp, 1);
+    BSP_UART_SendString(" ki:");
+    ble_uart_send_float(ki, 1);
+    BSP_UART_SendString("\r\n");
+}
+
 /* !STOP — 停止 */
 static void ble_handle_stop_command(void)
 {
     APP_Control_StopDirect();
     BSP_UART_SendString("OK STOP\r\n");
+}
+
+/* !PID [kp] [ki] — 设置或查询 PI 参数 */
+static void ble_handle_pid_command(const char *cmd)
+{
+    const char *p = cmd + 4;
+    while (*p == ' ') p++;
+
+    if (*p == '?') {
+        /* Query mode */
+        float kp, ki;
+        APP_Control_GetPID(&kp, &ki);
+        BSP_UART_SendString("OK PID:");
+        ble_uart_send_float(kp, 1);
+        BSP_UART_SendByte(',');
+        ble_uart_send_float(ki, 1);
+        BSP_UART_SendString("\r\n");
+        return;
+    }
+
+    /* Set mode: !PID <kp> <ki> */
+    {
+        float kp = (float)atof(p);
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p == '.') { p++; while (*p >= '0' && *p <= '9') p++; }
+        while (*p == ' ') p++;
+        float ki = (float)atof(p);
+
+        APP_Control_SetPID(kp, ki);
+        BSP_UART_SendString("OK PID:");
+        ble_uart_send_float(kp, 1);
+        BSP_UART_SendByte(',');
+        ble_uart_send_float(ki, 1);
+        BSP_UART_SendString("\r\n");
+    }
 }
 
 /* ---- 命令分发 ---- */
@@ -268,6 +322,20 @@ static void ble_dispatch_command(void)
         s_line_buf[1] == 'D' && s_line_buf[2] == 'R' &&
         s_line_buf[3] == 'I') {
         ble_handle_drive_command((const char *)s_line_buf);
+        return;
+    }
+    /* !PID */
+    if (s_line_len >= 4 &&
+        s_line_buf[1] == 'P' && s_line_buf[2] == 'I' &&
+        s_line_buf[3] == 'D') {
+        ble_handle_pid_command((const char *)s_line_buf);
+        return;
+    }
+    /* !SWP */
+    if (s_line_len >= 4 &&
+        s_line_buf[1] == 'S' && s_line_buf[2] == 'W' &&
+        s_line_buf[3] == 'P') {
+        ble_handle_swp_command((const char *)s_line_buf);
         return;
     }
     /* !STOP */
@@ -299,6 +367,25 @@ void MID_BLE_Poll(void)
     uint8_t byte;
 
     ble_spd_task_poll();
+
+    /* Sweep data dump: when !SWP profile completes, send buffered data */
+    if (APP_Control_IsSweepDone()) {
+        uint16_t count = APP_Control_GetSweepCount();
+        int16_t *target   = APP_Control_GetSweepTarget();
+        int16_t *actual_l = APP_Control_GetSweepActualL();
+        int16_t *actual_r = APP_Control_GetSweepActualR();
+
+        for (uint16_t i = 0; i < count; i++) {
+            BSP_UART_SendString("SWP:");
+            ble_uart_send_int(target[i]);
+            BSP_UART_SendByte(',');
+            ble_uart_send_int(actual_l[i]);
+            BSP_UART_SendByte(',');
+            ble_uart_send_int(actual_r[i]);
+            BSP_UART_SendString("\r\n");
+        }
+        BSP_UART_SendString("SWP_DONE\r\n");
+    }
 
     while (BSP_UART_Available() > 0) {
         byte = BSP_UART_ReadByte();
