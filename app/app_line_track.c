@@ -47,9 +47,15 @@
 #define APP_LT_DEADBAND         0.005f      /* PI deadband (m/s) */
 #define APP_LT_PWM_MAX          7800
 
-/* ---- Speed PI parameters (from README) ---- */
+/* distance_m = sum_pulses * DIST_PER_SUM_PULSE
+ * DIST_PER_SUM_PULSE = perimeter / pulses_per_rev / 2 = 0.000004 */
+#define APP_LT_DIST_PER_PULSE   (APP_LT_PERIMETER / APP_LT_PULSES_PER_REV / 2.0f)
+#define APP_LT_TARGET_DIST_M    6.14f       /* track perimeter: one lap */
+#define APP_LT_TARGET_PULSES    ((int32_t)(APP_LT_TARGET_DIST_M / APP_LT_DIST_PER_PULSE))
+
+/* ---- Speed PI parameters ---- */
 #define APP_LT_KP  600.0f
-#define APP_LT_KI  800.0f
+#define APP_LT_KI  600.0f
 
 /* ---- Line-loss recovery phases (consecutive 10ms ticks) ---- */
 #define APP_LT_LOST_PHASE1      20    /* 0-200ms: trust mid_line_track search */
@@ -66,12 +72,25 @@ typedef struct {
     float pwm_output;
 } app_lt_motor_t;
 
+/* ---- Line-track state machine ---- */
+typedef enum {
+    APP_LT_IDLE = 0,
+    APP_LT_RUNNING,
+    APP_LT_DONE
+} app_lt_state_t;
+
 /* ---- Static state ---- */
 static volatile app_lt_motor_t s_motor_left;
 static volatile app_lt_motor_t s_motor_right;
 static volatile bool s_running      = false;
 static volatile uint32_t s_tick     = 0;
 static volatile uint16_t s_sensor_data[8];
+
+/* Distance & timing */
+static volatile int32_t  s_total_pulses   = 0;
+static volatile float    s_distance_m     = 0.0f;
+static volatile uint32_t s_elapsed_ticks  = 0;      /* 10ms ticks since start */
+static volatile app_lt_state_t s_state    = APP_LT_IDLE;
 
 /* PI accumulator */
 static float s_last_bias_left;
@@ -122,7 +141,7 @@ static float app_lt_lowpass(float raw, float *filtered)
     return *filtered;
 }
 
-/* Convert m/s to 4-char signed string in cm/s, e.g. "+010", "-003" */
+/* Convert m/s to 4-char signed string in cm/s, e.g. "+035", "-012" */
 static void app_lt_fmt_speed(char *buf, float speed_mps)
 {
     int16_t cms = (int16_t)(speed_mps * 100.0f);
@@ -139,6 +158,32 @@ static void app_lt_fmt_speed(char *buf, float speed_mps)
     buf[pos]   = '\0';
 }
 
+/* Format elapsed time as "XX.XX" seconds */
+static void app_lt_fmt_time(char *buf, uint32_t ticks)
+{
+    uint32_t cs = ticks;  /* centiseconds (10ms ticks) */
+    uint32_t sec = cs / 100;
+    uint32_t frac = cs % 100;
+    buf[0] = '0' + (sec / 10) % 10;
+    buf[1] = '0' + sec % 10;
+    buf[2] = '.';
+    buf[3] = '0' + (frac / 10) % 10;
+    buf[4] = '0' + frac % 10;
+    buf[5] = '\0';
+}
+
+/* Format distance as "X.XX" meters */
+static void app_lt_fmt_dist(char *buf, float dist_m)
+{
+    int32_t cm = (int32_t)(dist_m * 100.0f);
+    uint8_t pos = 0;
+    buf[pos++] = '0' + (cm / 100) % 10;
+    buf[pos++] = '.';
+    buf[pos++] = '0' + (cm / 10) % 10;
+    buf[pos++] = '0' + cm % 10;
+    buf[pos]   = '\0';
+}
+
 /* ---- Public API ---- */
 
 void APP_LineTrack_Init(void)
@@ -152,6 +197,10 @@ void APP_LineTrack_Init(void)
     s_running      = false;
     s_tick         = 0;
     s_lost_ticks   = 0;
+    s_total_pulses  = 0;
+    s_distance_m    = 0.0f;
+    s_elapsed_ticks = 0;
+    s_state         = APP_LT_IDLE;
     s_last_bias_left  = 0.0f;
     s_last_bias_right = 0.0f;
 }
@@ -160,7 +209,7 @@ void APP_LineTrack_Init(void)
  * Called from 10ms timer ISR callback.
  * Full line-tracking control loop:
  *   read sensors -> compute targets (MID_LineTrack) -> enhanced recovery
- *   -> read encoders -> calc speed -> lowpass -> PI -> PWM
+ *   -> read encoders -> calc speed -> lowpass -> odometry -> PI -> PWM
  */
 void APP_LineTrack_TimerTick(void)
 {
@@ -213,37 +262,43 @@ void APP_LineTrack_TimerTick(void)
         return;
     }
 
-    /* 7. Compute line-tracking target speeds from middleware */
+    /* 7. Odometry: accumulate absolute encoder pulses */
+    s_total_pulses += (count_a > 0 ? count_a : -count_a)
+                    + (count_b > 0 ? count_b : -count_b);
+    s_distance_m = (float)s_total_pulses * APP_LT_DIST_PER_PULSE;
+
+    /* 7.5 Auto-stop at target distance */
+    if (s_total_pulses >= APP_LT_TARGET_PULSES) {
+        s_state = APP_LT_DONE;
+        s_running = false;
+        s_motor_left.target_speed  = 0.0f;
+        s_motor_right.target_speed = 0.0f;
+        BSP_Motor_Stop();
+        return;
+    }
+
+    /* 8. Compute line-tracking target speeds from middleware */
     MID_LineTrack_Update(raw_sensor, &left_tgt, &right_tgt);
 
-    /* 8. Enhanced line-loss recovery — override targets when line is lost */
+    /* 9. Enhanced line-loss recovery */
     if (MID_LineTrack_IsLineLost()) {
         s_lost_ticks++;
 
         if (s_lost_ticks > APP_LT_LOST_PHASE2) {
-            /*
-             * Phase 3 (>500ms): full spin toward last known direction.
-             * One wheel forward, one backward — rotates in place.
-             */
+            /* Phase 3 (>500ms): full spin */
             int8_t last_err = MID_LineTrack_GetLastError();
             if (last_err > 0) {
-                /* Line was to the right — spin right */
                 left_tgt  =  APP_LT_SPIN_SPEED;
                 right_tgt = -APP_LT_SPIN_SPEED;
             } else if (last_err < 0) {
-                /* Line was to the left — spin left */
                 left_tgt  = -APP_LT_SPIN_SPEED;
                 right_tgt =  APP_LT_SPIN_SPEED;
             } else {
-                /* No prior direction — spin right as default */
                 left_tgt  =  APP_LT_SPIN_SPEED;
                 right_tgt = -APP_LT_SPIN_SPEED;
             }
         } else if (s_lost_ticks > APP_LT_LOST_PHASE1) {
-            /*
-             * Phase 2 (200-500ms): pivot turn.
-             * One wheel slow forward, one slow backward.
-             */
+            /* Phase 2 (200-500ms): pivot turn */
             int8_t last_err = MID_LineTrack_GetLastError();
             if (last_err > 0) {
                 left_tgt  =  APP_LT_PIVOT_SPEED;
@@ -256,7 +311,6 @@ void APP_LineTrack_TimerTick(void)
                 right_tgt = -APP_LT_PIVOT_SPEED;
             }
         }
-        /* Phase 1 (0-200ms): trust MID_LineTrack_Update's built-in search */
     } else {
         s_lost_ticks = 0;
     }
@@ -264,7 +318,7 @@ void APP_LineTrack_TimerTick(void)
     s_motor_left.target_speed  = left_tgt;
     s_motor_right.target_speed = right_tgt;
 
-    /* 9. PI control and PWM output */
+    /* 10. PI control and PWM output */
     pwm_a = app_lt_pi_update(s_motor_left.current_speed,
         s_motor_left.target_speed, &s_last_bias_left,
         &s_motor_left.pwm_output);
@@ -273,92 +327,91 @@ void APP_LineTrack_TimerTick(void)
         &s_motor_right.pwm_output);
     BSP_Motor_SetPWM(pwm_a, pwm_b);
 
+    /* 11. Timing */
+    s_elapsed_ticks++;
     s_tick++;
 }
 
 /*
  * Called from main loop. Updates OLED display every 500ms.
  * Layout:
- *   S:n Er:±x       (sensor count, line error)
- *   L:+010|+009     (target | actual, cm/s)
- *   R:+010|+009
- *   Status: RUN / LOST / STOP
+ *   [T] 12.34s           (elapsed time)
+ *   L:+035|+035          (target | actual speed, cm/s)
+ *   R:+035|+035
+ *   D:3.05/6.14m  RUN    (distance / status)
  */
 void APP_LineTrack_Run(void)
 {
-    char buf[5];
-    uint8_t cnt = 0;
-    uint8_t i;
+    char buf[6];
 
     if (s_tick % 50 != 0) {
         return;
     }
 
-    /* Line-loss fast refresh: every 100ms when searching */
+    /* Line-loss fast refresh: every 100ms */
     if (s_lost_ticks > 0 && (s_tick % 10 != 0)) {
         return;
     }
 
     MID_OLED_Clear();
 
-    if (!s_running) {
-        MID_OLED_ShowString(48, 24, "STOP", 12);
+    if (s_state == APP_LT_IDLE) {
+        MID_OLED_ShowString(30, 0, "LINE-TRACK", 12);
+        MID_OLED_ShowString(36, 20, "READY", 12);
+        MID_OLED_ShowString(12, 36, "Key=Start", 12);
+    } else if (s_state == APP_LT_DONE) {
+        /* Finished: show result */
+        MID_OLED_ShowString(18, 0, "LAP DONE!", 12);
+
+        app_lt_fmt_time(buf, s_elapsed_ticks);
+        MID_OLED_ShowString(0, 16, "Time:", 12);
+        MID_OLED_ShowString(42, 16, buf, 12);
+        MID_OLED_ShowString(90, 16, "s", 12);
+
+        app_lt_fmt_dist(buf, s_distance_m);
+        MID_OLED_ShowString(0, 32, "Dist:", 12);
+        MID_OLED_ShowString(42, 32, buf, 12);
+        MID_OLED_ShowString(90, 32, "m", 12);
+
+        /* Average speed */
+        {
+            float avg = s_distance_m / ((float)s_elapsed_ticks * 0.01f);
+            app_lt_fmt_speed(buf, avg);
+            buf[4] = '\0'; /* truncate to "+035" format */
+            MID_OLED_ShowString(0, 48, "Avg:", 12);
+            MID_OLED_ShowString(36, 48, buf, 12);
+            MID_OLED_ShowString(66, 48, "cm/s", 12);
+        }
     } else {
-        for (i = 0; i < 8; i++) {
-            if (s_sensor_data[i]) cnt++;
-        }
+        /* Running */
+        /* Line 0: elapsed time */
+        app_lt_fmt_time(buf, s_elapsed_ticks);
+        MID_OLED_ShowString(0, 0, "T", 12);
+        MID_OLED_ShowString(12, 0, buf, 12);
+        MID_OLED_ShowString(66, 0, "s", 12);
 
-        /* Line 0: sensor count + line error */
-        {
-            char buf_cnt[2];
-            buf_cnt[0] = '0' + cnt;
-            buf_cnt[1] = '\0';
-            MID_OLED_ShowString(0, 0, "S:", 12);
-            MID_OLED_ShowString(12, 0, buf_cnt, 12);
-        }
-        {
-            int8_t error = MID_LineTrack_GetError();
-            MID_OLED_ShowString(30, 0, "Er:", 12);
-            if (error < 0) {
-                MID_OLED_ShowString(54, 0, "-", 12);
-                MID_OLED_ShowNumber(62, 0, (uint32_t)(-error), 2, 12);
-            } else {
-                MID_OLED_ShowString(54, 0, "+", 12);
-                MID_OLED_ShowNumber(62, 0, (uint32_t)error, 2, 12);
-            }
-        }
-
-        /* Line 16: L target */
-        app_lt_fmt_speed(buf, s_motor_left.target_speed);
-        MID_OLED_ShowString(0, 16, "Lt:", 12);
-        MID_OLED_ShowString(18, 16, buf, 12);
-
-        /* Line 16 (right half): L actual */
+        /* Line 12: L speed */
         app_lt_fmt_speed(buf, s_motor_left.current_speed);
-        MID_OLED_ShowString(66, 16, buf, 12);
+        MID_OLED_ShowString(0, 12, "L:", 12);
+        MID_OLED_ShowString(12, 12, buf, 12);
 
-        /* Line 28: R target */
-        app_lt_fmt_speed(buf, s_motor_right.target_speed);
-        MID_OLED_ShowString(0, 28, "Rt:", 12);
-        MID_OLED_ShowString(18, 28, buf, 12);
-
-        /* Line 28 (right half): R actual */
+        /* Line 24: R speed */
         app_lt_fmt_speed(buf, s_motor_right.current_speed);
-        MID_OLED_ShowString(66, 28, buf, 12);
+        MID_OLED_ShowString(0, 24, "R:", 12);
+        MID_OLED_ShowString(12, 24, buf, 12);
 
-        /* Line 44: status */
+        /* Line 36: distance + status */
+        app_lt_fmt_dist(buf, s_distance_m);
+        MID_OLED_ShowString(0, 40, "D:", 12);
+        MID_OLED_ShowString(12, 40, buf, 12);
+        MID_OLED_ShowString(54, 40, "/6.14m", 12);
+
+        /* Line 52: status */
         if (s_lost_ticks > 0) {
-            MID_OLED_ShowString(0, 44, "LOST ", 12);
-            MID_OLED_ShowNumber(30, 44, s_lost_ticks, 3, 12);
-            if (s_lost_ticks > APP_LT_LOST_PHASE2) {
-                MID_OLED_ShowString(54, 44, "SPIN", 12);
-            } else if (s_lost_ticks > APP_LT_LOST_PHASE1) {
-                MID_OLED_ShowString(54, 44, "PIVOT", 12);
-            } else {
-                MID_OLED_ShowString(54, 44, "SRCH", 12);
-            }
+            MID_OLED_ShowString(0, 52, "LOST", 12);
+            MID_OLED_ShowNumber(30, 52, s_lost_ticks, 3, 12);
         } else {
-            MID_OLED_ShowString(0, 44, "RUN", 12);
+            MID_OLED_ShowString(0, 52, "RUN", 12);
         }
     }
 
@@ -372,8 +425,12 @@ void APP_LineTrack_Start(void)
     s_last_bias_right = 0.0f;
     s_motor_left.pwm_output  = 0.0f;
     s_motor_right.pwm_output = 0.0f;
-    s_lost_ticks = 0;
-    s_running = true;
+    s_lost_ticks    = 0;
+    s_total_pulses  = 0;
+    s_distance_m    = 0.0f;
+    s_elapsed_ticks = 0;
+    s_state         = APP_LT_RUNNING;
+    s_running       = true;
 }
 
 void APP_LineTrack_Stop(void)
@@ -382,6 +439,9 @@ void APP_LineTrack_Stop(void)
     s_motor_left.target_speed  = 0.0f;
     s_motor_right.target_speed = 0.0f;
     s_lost_ticks = 0;
+    if (s_total_pulses < APP_LT_TARGET_PULSES) {
+        s_state = APP_LT_IDLE;  /* manual stop: reset */
+    }
     BSP_Motor_Stop();
 }
 

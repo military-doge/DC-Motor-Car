@@ -39,31 +39,19 @@
  * Error range (all line widths 1-8): 0, ±1, ±2, ..., ±7.
  * Table size 8 covers all possible |error| (0..7).
  *
- * Three lookup tables indexed by abs_error:
- *   s_attenuation_table — speed attenuation ratio (0.0~1.0), from desktop
- *       tuned values. base_speed = MID_TRACK_BASE_SPEED * ratio[idx].
+ * Two lookup tables indexed by abs_error:
  *   s_kp_table   — proportional gain, from desktop tuned values
  *   s_kd_table   — derivative gain, from desktop tuned values */
 #define MID_TRACK_TBL_SIZE        8
-#define MID_TRACK_BASE_SPEED      0.28f   /* straight-line speed (m/s) */
+#define MID_TRACK_BASE_SPEED      0.35f   /* straight-line speed (m/s) */
 
-static const float s_attenuation_table[MID_TRACK_TBL_SIZE] = {
-    1.00f,    /* err=0  — 100%  (straight)    */
-    0.96f,    /* err=1  — 96.0%               */
-    0.86f,    /* err=2  — 86.0%               */
-    0.70f,    /* err=3  — 70.0%               */
-    0.56f,    /* err=4  — 56.0%               */
-    0.48f,    /* err=5  — 48.0%               */
-    0.40f,    /* err=6  — 40.0%               */
-    0.35f,    /* err=7  — 35.0%               */
-};
 static const float s_kp_table[MID_TRACK_TBL_SIZE] = {
-    [0] = 0.0064f, [1] = 0.0100f, [2] = 0.0160f, [3] = 0.0155f,
-    [4] = 0.0115f, [5] = 0.0095f, [6] = 0.0135f, [7] = 0.012f,
+    [0] = 0.0080f, [1] = 0.0120f, [2] = 0.0180f, [3] = 0.0180f,
+    [4] = 0.0204f, [5] = 0.0187f, [6] = 0.0170f, [7] = 0.0152f,
 };
 static const float s_kd_table[MID_TRACK_TBL_SIZE] = {
-    [0] = 0.0022f, [1] = 0.0033f, [2] = 0.0050f, [3] = 0.0050f,
-    [4] = 0.0038f, [5] = 0.0033f, [6] = 0.0052f, [7] = 0.0050f,
+    [0] = 0.0047f, [1] = 0.0059f, [2] = 0.0075f, [3] = 0.0075f,
+    [4] = 0.0064f, [5] = 0.0059f, [6] = 0.0075f, [7] = 0.0075f,
 };
 
 /* 8-channel sensor weights (asymmetric, left-to-right) */
@@ -188,20 +176,20 @@ void MID_LineTrack_Update(const uint16_t sensor_data[8],
     s_last_valid_error = s_line_error;
     s_line_lost = false;
 
-    /* Slew rate limit: clamp error change to ±3 per tick */
+    /* Slew rate limit: clamp error change to ±5 per tick */
     {
         int8_t delta = s_line_error - s_filtered_error;
-        if (delta > 3) delta = 3;
-        if (delta < -3) delta = -3;
+        if (delta > 5) delta = 5;
+        if (delta < -5) delta = -5;
         s_filtered_error += delta;
     }
 
     error     = s_filtered_error;
     abs_error = (error > 0) ? error : -error;
 
-    /* Step 2: base speed = straight speed × attenuation ratio */
+    /* Step 2: uniform base speed, KP/KD from table */
     uint8_t idx = (abs_error < MID_TRACK_TBL_SIZE) ? abs_error : (MID_TRACK_TBL_SIZE - 1);
-    base_speed   = MID_TRACK_BASE_SPEED * s_attenuation_table[idx];
+    base_speed   = MID_TRACK_BASE_SPEED;
     float kp_eff = s_kp_table[idx];
     float kd_eff = s_kd_table[idx];
 

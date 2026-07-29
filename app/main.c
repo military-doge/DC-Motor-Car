@@ -53,16 +53,16 @@
 
 static void on_timer_10ms(void)
 {
-    APP_GyroPath_TimerTick();
+    APP_LineTrack_TimerTick();
     BSP_DMA_RX_Process();
 }
 
 static void on_key_click(void)
 {
-    if (APP_GyroPath_IsRunning()) {
-        APP_GyroPath_Stop();
+    if (APP_LineTrack_IsRunning()) {
+        APP_LineTrack_Stop();
     } else {
-        APP_GyroPath_Start();
+        APP_LineTrack_Start();
     }
 }
 
@@ -112,6 +112,6 @@ int main(void)
     /* [7] Main loop */
     while (1) {
         MID_BLE_Poll();
-        APP_GyroPath_Run();
+        APP_LineTrack_Run();
     }
 }
