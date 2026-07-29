@@ -404,6 +404,16 @@
               <FileType>1</FileType>
               <FilePath>.\app\app_line_track_low_speed_straight.c</FilePath>
             </File>
+            <File>
+              <FileName>app_line_track_low_speed_circle.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\app\app_line_track_low_speed_circle.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_test.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\app\app_test.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -453,6 +463,11 @@
               <FileName>bsp_dma_rx.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\bsp\bsp_dma_rx.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_servo.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\bsp\bsp_servo.c</FilePath>
             </File>
           </Files>
         </Group>

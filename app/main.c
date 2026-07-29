@@ -40,25 +40,30 @@
 #include "bsp_timer.h"
 #include "bsp_uart.h"
 #include "bsp_dma_rx.h"
+#include "bsp_servo.h"
 #include "mid_oled.h"
 #include "mid_ble.h"
 #include "mid_line_track.h"
 #include "app_control.h"
-#include "app_line_track_high_speed.h"
+// #include "app_line_track_low_speed_circle.h"
+// #include "app_line_track_high_speed.h"
+#include "app_test.h"
 /* ---- Callback glue (lives in main.c, delegates to app layer) ---- */
 
 static void on_timer_10ms(void)
 {
-    APP_LineTrack_TimerTick();
+    BSP_Key_Scan();
+    APP_Test_TimerTick();
     BSP_DMA_RX_Process();
 }
 
 static void on_key_click(void)
 {
-    if (APP_LineTrack_IsRunning()) {
-        APP_LineTrack_Stop();
+    BSP_LED_Toggle();
+    if (APP_Test_IsRunning()) {
+        APP_Test_Stop();
     } else {
-        APP_LineTrack_Start();
+        APP_Test_Start();
     }
 }
 
@@ -78,6 +83,7 @@ int main(void)
     BSP_Key_Init();
     BSP_Timer_Init();
     BSP_UART_Init();
+    BSP_Servo_Init();
 
     /* [3] Middleware layer init */
     MID_OLED_Init();
@@ -86,20 +92,24 @@ int main(void)
 
     /* [4] App layer init */
     APP_Control_Init();
-    APP_LineTrack_Init();
+    APP_Test_Init();
 
     /* [5] Register cross-layer callbacks */
     BSP_Timer_RegisterCallback(on_timer_10ms);
     BSP_Key_RegisterClickCallback(on_key_click);
 
-    /* [6] Boot screen: LED on, OLED shows OK, wait for key */
+    /* [6] Boot screen: LED on, OLED shows OK */
     BSP_LED_On();
     MID_OLED_ShowString(48, 24, "OK", 12);
+    MID_OLED_RefreshGram();
+    BSP_Delay_ms(500);
+    BSP_LED_Off();
+    MID_OLED_ShowString(0, 0, "READY", 12);
     MID_OLED_RefreshGram();
 
     /* [7] Main loop */
     while (1) {
         MID_BLE_Poll();
-        APP_LineTrack_Run();
+        APP_Test_Run();
     }
 }

@@ -152,6 +152,17 @@ PWM1.PWM_CHANNEL_1.$name        = "ti_driverlib_pwm_PWMTimerCC1";
 PWM1.ccp0PinConfig.$name        = "ti_driverlib_gpio_GPIOPinGeneric4";
 PWM1.ccp1PinConfig.$name        = "ti_driverlib_gpio_GPIOPinGeneric5";
 
+const PWM2    = PWM.addInstance();
+PWM2.$name                      = "PWM_SERVO";
+PWM2.timerStartTimer            = true;
+PWM2.pwmMode                    = "EDGE_ALIGN_UP";
+PWM2.timerCount                 = 19999;
+PWM2.peripheral.$assign         = "TIMA0";
+PWM2.peripheral.ccp0Pin.$assign = "PA0";
+PWM2.peripheral.ccp1Pin.$assign = "None";
+PWM2.PWM_CHANNEL_0.$name        = "ti_driverlib_pwm_ServoCC0";
+PWM2.ccp0PinConfig.$name        = "ti_driverlib_gpio_GPIOPinGeneric15";
+
 SYSCTL.forceDefaultClkConfig = true;
 SYSCTL.clockTreeEn           = true;
 
