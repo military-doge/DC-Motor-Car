@@ -50,8 +50,6 @@
 /* distance_m = sum_pulses * DIST_PER_SUM_PULSE
  * DIST_PER_SUM_PULSE = perimeter / pulses_per_rev / 2 = 0.000004 */
 #define APP_LT_DIST_PER_PULSE   (APP_LT_PERIMETER / APP_LT_PULSES_PER_REV / 2.0f)
-#define APP_LT_DECEL_DIST_M     4.1f        /* decelerate by 50% after 4.1m */
-#define APP_LT_DECEL_PULSES     ((int32_t)(APP_LT_DECEL_DIST_M / APP_LT_DIST_PER_PULSE))
 
 /* ---- Speed PI parameters ---- */
 #define APP_LT_KP  600.0f
@@ -99,8 +97,6 @@ static float s_last_bias_right;
 /* Line-loss recovery */
 static volatile uint16_t s_lost_ticks = 0;
 
-/* Deceleration flag */
-static volatile bool s_decelerated = false;
 
 /* ---- Helpers ---- */
 
@@ -200,7 +196,6 @@ void APP_LineTrack_Init(void)
     s_running      = false;
     s_tick         = 0;
     s_lost_ticks   = 0;
-    s_decelerated  = false;
     s_total_pulses  = 0;
     s_distance_m    = 0.0f;
     s_elapsed_ticks = 0;
@@ -259,85 +254,81 @@ void APP_LineTrack_TimerTick(void)
     app_lt_lowpass(raw_a, &s_motor_left.current_speed);
     app_lt_lowpass(raw_b, &s_motor_right.current_speed);
 
-    /* 6. Stop: zero targets, stop motors */
+    /* 6. When stopped, hold target 0 for active braking via PI */
     if (!s_running) {
-        BSP_Motor_Stop();
-        s_lost_ticks = 0;
-        return;
-    }
-
-    /* 7. Odometry: accumulate absolute encoder pulses */
-    s_total_pulses += (count_a > 0 ? count_a : -count_a)
-                    + (count_b > 0 ? count_b : -count_b);
-    s_distance_m = (float)s_total_pulses * APP_LT_DIST_PER_PULSE;
-
-    /* 7.5 Decelerate 50% after 4m */
-    if (!s_decelerated && s_total_pulses >= APP_LT_DECEL_PULSES) {
-        float half_speed = MID_LineTrack_GetBaseSpeed() * 0.5f;
-        MID_LineTrack_SetBaseSpeed(half_speed);
-        s_decelerated = true;
-    }
-
-    /* 7.6 Auto-stop: any 4 consecutive channels all black */
-    {
-        uint8_t j;
-        bool stop_now = false;
-        for (j = 0; j <= 4; j++) {
-            if (raw_sensor[j] && raw_sensor[j+1] && raw_sensor[j+2] && raw_sensor[j+3]) {
-                stop_now = true;
-                break;
-            }
-        }
-        if (stop_now) {
-            s_state = APP_LT_DONE;
-            s_running = false;
-            s_motor_left.target_speed  = 0.0f;
-            s_motor_right.target_speed = 0.0f;
-            BSP_Motor_Stop();
-            return;
-        }
-    }
-
-    /* 8. Compute line-tracking target speeds from middleware */
-    MID_LineTrack_Update(raw_sensor, &left_tgt, &right_tgt);
-
-    /* 9. Enhanced line-loss recovery */
-    if (MID_LineTrack_IsLineLost()) {
-        s_lost_ticks++;
-
-        if (s_lost_ticks > APP_LT_LOST_PHASE2) {
-            /* Phase 3 (>500ms): full spin */
-            int8_t last_err = MID_LineTrack_GetLastError();
-            if (last_err > 0) {
-                left_tgt  =  APP_LT_SPIN_SPEED;
-                right_tgt = -APP_LT_SPIN_SPEED;
-            } else if (last_err < 0) {
-                left_tgt  = -APP_LT_SPIN_SPEED;
-                right_tgt =  APP_LT_SPIN_SPEED;
-            } else {
-                left_tgt  =  APP_LT_SPIN_SPEED;
-                right_tgt = -APP_LT_SPIN_SPEED;
-            }
-        } else if (s_lost_ticks > APP_LT_LOST_PHASE1) {
-            /* Phase 2 (200-500ms): pivot turn */
-            int8_t last_err = MID_LineTrack_GetLastError();
-            if (last_err > 0) {
-                left_tgt  =  APP_LT_PIVOT_SPEED;
-                right_tgt = -APP_LT_PIVOT_SPEED;
-            } else if (last_err < 0) {
-                left_tgt  = -APP_LT_PIVOT_SPEED;
-                right_tgt =  APP_LT_PIVOT_SPEED;
-            } else {
-                left_tgt  =  APP_LT_PIVOT_SPEED;
-                right_tgt = -APP_LT_PIVOT_SPEED;
-            }
-        }
-    } else {
+        s_motor_left.target_speed  = 0.0f;
+        s_motor_right.target_speed = 0.0f;
         s_lost_ticks = 0;
     }
 
-    s_motor_left.target_speed  = left_tgt;
-    s_motor_right.target_speed = right_tgt;
+    /* 7. Odometry & line tracking (only when running) */
+    if (s_running) {
+        /* Odometry: accumulate absolute encoder pulses */
+        s_total_pulses += (count_a > 0 ? count_a : -count_a)
+                        + (count_b > 0 ? count_b : -count_b);
+        s_distance_m = (float)s_total_pulses * APP_LT_DIST_PER_PULSE;
+
+        /* Auto-stop: any 4 consecutive channels all black */
+        {
+            uint8_t j;
+            bool stop_now = false;
+            for (j = 0; j <= 4; j++) {
+                if (raw_sensor[j] && raw_sensor[j+1] && raw_sensor[j+2] && raw_sensor[j+3]) {
+                    stop_now = true;
+                    break;
+                }
+            }
+            if (stop_now) {
+                s_state = APP_LT_DONE;
+                s_running = false;
+                s_motor_left.target_speed  = 0.0f;
+                s_motor_right.target_speed = 0.0f;
+            }
+        }
+
+        if (s_running) {
+            /* Compute line-tracking target speeds from middleware */
+            MID_LineTrack_Update(raw_sensor, &left_tgt, &right_tgt);
+
+            /* Enhanced line-loss recovery */
+            if (MID_LineTrack_IsLineLost()) {
+                s_lost_ticks++;
+
+                if (s_lost_ticks > APP_LT_LOST_PHASE2) {
+                    /* Phase 3 (>500ms): full spin */
+                    int8_t last_err = MID_LineTrack_GetLastError();
+                    if (last_err > 0) {
+                        left_tgt  =  APP_LT_SPIN_SPEED;
+                        right_tgt = -APP_LT_SPIN_SPEED;
+                    } else if (last_err < 0) {
+                        left_tgt  = -APP_LT_SPIN_SPEED;
+                        right_tgt =  APP_LT_SPIN_SPEED;
+                    } else {
+                        left_tgt  =  APP_LT_SPIN_SPEED;
+                        right_tgt = -APP_LT_SPIN_SPEED;
+                    }
+                } else if (s_lost_ticks > APP_LT_LOST_PHASE1) {
+                    /* Phase 2 (200-500ms): pivot turn */
+                    int8_t last_err = MID_LineTrack_GetLastError();
+                    if (last_err > 0) {
+                        left_tgt  =  APP_LT_PIVOT_SPEED;
+                        right_tgt = -APP_LT_PIVOT_SPEED;
+                    } else if (last_err < 0) {
+                        left_tgt  = -APP_LT_PIVOT_SPEED;
+                        right_tgt =  APP_LT_PIVOT_SPEED;
+                    } else {
+                        left_tgt  =  APP_LT_PIVOT_SPEED;
+                        right_tgt = -APP_LT_PIVOT_SPEED;
+                    }
+                }
+            } else {
+                s_lost_ticks = 0;
+            }
+
+            s_motor_left.target_speed  = left_tgt;
+            s_motor_right.target_speed = right_tgt;
+        }
+    }
 
     /* 10. PI control and PWM output */
     pwm_a = app_lt_pi_update(s_motor_left.current_speed,
@@ -447,7 +438,6 @@ void APP_LineTrack_Start(void)
     s_motor_left.pwm_output  = 0.0f;
     s_motor_right.pwm_output = 0.0f;
     s_lost_ticks    = 0;
-    s_decelerated   = false;
     s_total_pulses  = 0;
     s_distance_m    = 0.0f;
     s_elapsed_ticks = 0;
@@ -465,7 +455,6 @@ void APP_LineTrack_Stop(void)
     if (s_state != APP_LT_DONE) {
         s_state = APP_LT_IDLE;  /* manual stop: reset */
     }
-    BSP_Motor_Stop();
 }
 
 bool APP_LineTrack_IsRunning(void)
