@@ -41,18 +41,28 @@
  *
  * Two lookup tables indexed by abs_error:
  *   s_kp_table   — proportional gain, from desktop tuned values
- *   s_kd_table   — derivative gain, from desktop tuned values */
+ *   s_kd_table   — derivative gain, from desktop tuned values
+ *
+ * Defaults are baked into s_kp_default / s_kd_default.
+ * App layer may override the working tables via MID_LineTrack_SetKpTable() etc.
+ * MID_LineTrack_ResetParams() restores defaults. */
 #define MID_TRACK_TBL_SIZE        8
-#define MID_TRACK_BASE_SPEED      0.35f   /* straight-line speed (m/s) */
 
-static const float s_kp_table[MID_TRACK_TBL_SIZE] = {
+/* ---- Default parameters (immutable reference) ---- */
+static const float s_kp_default[MID_TRACK_TBL_SIZE] = {
     [0] = 0.0080f, [1] = 0.0120f, [2] = 0.0180f, [3] = 0.0180f,
     [4] = 0.0194f, [5] = 0.0178f, [6] = 0.0180f, [7] = 0.0161f,
 };
-static const float s_kd_table[MID_TRACK_TBL_SIZE] = {
+static const float s_kd_default[MID_TRACK_TBL_SIZE] = {
     [0] = 0.0047f, [1] = 0.0061f, [2] = 0.0077f, [3] = 0.0077f,
     [4] = 0.0066f, [5] = 0.0061f, [6] = 0.0077f, [7] = 0.0077f,
 };
+#define MID_TRACK_DEFAULT_BASE_SPEED  0.35f
+
+/* ---- Working parameters (overridable by app layer) ---- */
+static float s_base_speed = MID_TRACK_DEFAULT_BASE_SPEED;
+static float s_kp_table[MID_TRACK_TBL_SIZE];
+static float s_kd_table[MID_TRACK_TBL_SIZE];
 
 /* 8-channel sensor weights (asymmetric, left-to-right) */
 #define MID_TRACK_W0  (-7)
@@ -82,11 +92,18 @@ static bool  s_line_lost         = false;
 
 bool MID_LineTrack_Init(void)
 {
+    uint8_t i;
     s_line_error       = 0;
     s_prev_error       = 0;
     s_last_valid_error = 0;
     s_filtered_error   = 0;
     s_line_lost        = false;
+    /* Load default parameters */
+    s_base_speed = MID_TRACK_DEFAULT_BASE_SPEED;
+    for (i = 0; i < MID_TRACK_TBL_SIZE; i++) {
+        s_kp_table[i] = s_kp_default[i];
+        s_kd_table[i] = s_kd_default[i];
+    }
     return true;
 }
 
@@ -120,7 +137,7 @@ bool MID_LineTrack_IsLineLost(void)
  *
  * - Weighted average of 8 binary sensors produces error (-7..+7)
  * - No deadzone: continuous correction at all errors
- * - Nonlinear speed decay: base = MID_TRACK_BASE_SPEED × attenuation ratio
+ * - Uniform base speed from s_base_speed (overridable by app layer)
  * - P+D: standard PD, KD tuned from KP up
  * - Differential steering: left = base + correction, right = base - correction
  *
@@ -149,8 +166,8 @@ void MID_LineTrack_Update(const uint16_t sensor_data[8],
     if (sum == 8) {
         s_line_error  = 0;
         s_line_lost   = false;
-        *out_left_speed  = MID_TRACK_BASE_SPEED;
-        *out_right_speed = MID_TRACK_BASE_SPEED;
+        *out_left_speed  = s_base_speed;
+        *out_right_speed = s_base_speed;
         return;
     }
 
@@ -166,8 +183,8 @@ void MID_LineTrack_Update(const uint16_t sensor_data[8],
             *out_left_speed  = MID_TRACK_SEARCH_SPEED + search_correction;
             *out_right_speed = MID_TRACK_SEARCH_SPEED - search_correction;
         } else {
-            *out_left_speed  = MID_TRACK_BASE_SPEED;
-            *out_right_speed = MID_TRACK_BASE_SPEED;
+            *out_left_speed  = s_base_speed;
+            *out_right_speed = s_base_speed;
         }
         return;
     }
@@ -189,7 +206,7 @@ void MID_LineTrack_Update(const uint16_t sensor_data[8],
 
     /* Step 2: uniform base speed, KP/KD from table */
     uint8_t idx = (abs_error < MID_TRACK_TBL_SIZE) ? abs_error : (MID_TRACK_TBL_SIZE - 1);
-    base_speed   = MID_TRACK_BASE_SPEED;
+    base_speed   = s_base_speed;
     float kp_eff = s_kp_table[idx];
     float kd_eff = s_kd_table[idx];
 
@@ -208,4 +225,52 @@ void MID_LineTrack_Update(const uint16_t sensor_data[8],
     /* Step 7: differential steering output */
     *out_left_speed  = base_speed + correction;
     *out_right_speed = base_speed - correction;
+}
+
+/* ---- Parameter override API ---- */
+
+void MID_LineTrack_SetBaseSpeed(float speed)
+{
+    s_base_speed = speed;
+}
+
+float MID_LineTrack_GetBaseSpeed(void)
+{
+    return s_base_speed;
+}
+
+void MID_LineTrack_SetKpTable(const float kp[8])
+{
+    uint8_t i;
+    for (i = 0; i < MID_TRACK_TBL_SIZE; i++) {
+        s_kp_table[i] = kp[i];
+    }
+}
+
+void MID_LineTrack_SetKdTable(const float kd[8])
+{
+    uint8_t i;
+    for (i = 0; i < MID_TRACK_TBL_SIZE; i++) {
+        s_kd_table[i] = kd[i];
+    }
+}
+
+const float *MID_LineTrack_GetKpTable(void)
+{
+    return s_kp_table;
+}
+
+const float *MID_LineTrack_GetKdTable(void)
+{
+    return s_kd_table;
+}
+
+void MID_LineTrack_ResetParams(void)
+{
+    uint8_t i;
+    s_base_speed = MID_TRACK_DEFAULT_BASE_SPEED;
+    for (i = 0; i < MID_TRACK_TBL_SIZE; i++) {
+        s_kp_table[i] = s_kp_default[i];
+        s_kd_table[i] = s_kd_default[i];
+    }
 }

@@ -30,7 +30,7 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "app_line_track.h"
+#include "app_line_track_high_speed.h"
 #include "bsp_motor.h"
 #include "bsp_encoder.h"
 #include "bsp_grayscale.h"
@@ -50,8 +50,8 @@
 /* distance_m = sum_pulses * DIST_PER_SUM_PULSE
  * DIST_PER_SUM_PULSE = perimeter / pulses_per_rev / 2 = 0.000004 */
 #define APP_LT_DIST_PER_PULSE   (APP_LT_PERIMETER / APP_LT_PULSES_PER_REV / 2.0f)
-#define APP_LT_TARGET_DIST_M    6.14f       /* track perimeter: one lap */
-#define APP_LT_TARGET_PULSES    ((int32_t)(APP_LT_TARGET_DIST_M / APP_LT_DIST_PER_PULSE))
+#define APP_LT_DECEL_DIST_M     4.1f        /* decelerate by 50% after 4.1m */
+#define APP_LT_DECEL_PULSES     ((int32_t)(APP_LT_DECEL_DIST_M / APP_LT_DIST_PER_PULSE))
 
 /* ---- Speed PI parameters ---- */
 #define APP_LT_KP  600.0f
@@ -98,6 +98,9 @@ static float s_last_bias_right;
 
 /* Line-loss recovery */
 static volatile uint16_t s_lost_ticks = 0;
+
+/* Deceleration flag */
+static volatile bool s_decelerated = false;
 
 /* ---- Helpers ---- */
 
@@ -197,6 +200,7 @@ void APP_LineTrack_Init(void)
     s_running      = false;
     s_tick         = 0;
     s_lost_ticks   = 0;
+    s_decelerated  = false;
     s_total_pulses  = 0;
     s_distance_m    = 0.0f;
     s_elapsed_ticks = 0;
@@ -267,14 +271,31 @@ void APP_LineTrack_TimerTick(void)
                     + (count_b > 0 ? count_b : -count_b);
     s_distance_m = (float)s_total_pulses * APP_LT_DIST_PER_PULSE;
 
-    /* 7.5 Auto-stop at target distance */
-    if (s_total_pulses >= APP_LT_TARGET_PULSES) {
-        s_state = APP_LT_DONE;
-        s_running = false;
-        s_motor_left.target_speed  = 0.0f;
-        s_motor_right.target_speed = 0.0f;
-        BSP_Motor_Stop();
-        return;
+    /* 7.5 Decelerate 50% after 4m */
+    if (!s_decelerated && s_total_pulses >= APP_LT_DECEL_PULSES) {
+        float half_speed = MID_LineTrack_GetBaseSpeed() * 0.5f;
+        MID_LineTrack_SetBaseSpeed(half_speed);
+        s_decelerated = true;
+    }
+
+    /* 7.6 Auto-stop: any 4 consecutive channels all black */
+    {
+        uint8_t j;
+        bool stop_now = false;
+        for (j = 0; j <= 4; j++) {
+            if (raw_sensor[j] && raw_sensor[j+1] && raw_sensor[j+2] && raw_sensor[j+3]) {
+                stop_now = true;
+                break;
+            }
+        }
+        if (stop_now) {
+            s_state = APP_LT_DONE;
+            s_running = false;
+            s_motor_left.target_speed  = 0.0f;
+            s_motor_right.target_speed = 0.0f;
+            BSP_Motor_Stop();
+            return;
+        }
     }
 
     /* 8. Compute line-tracking target speeds from middleware */
@@ -404,7 +425,7 @@ void APP_LineTrack_Run(void)
         app_lt_fmt_dist(buf, s_distance_m);
         MID_OLED_ShowString(0, 40, "D:", 12);
         MID_OLED_ShowString(12, 40, buf, 12);
-        MID_OLED_ShowString(54, 40, "/6.14m", 12);
+        MID_OLED_ShowString(54, 40, "m", 12);
 
         /* Line 52: status */
         if (s_lost_ticks > 0) {
@@ -426,11 +447,13 @@ void APP_LineTrack_Start(void)
     s_motor_left.pwm_output  = 0.0f;
     s_motor_right.pwm_output = 0.0f;
     s_lost_ticks    = 0;
+    s_decelerated   = false;
     s_total_pulses  = 0;
     s_distance_m    = 0.0f;
     s_elapsed_ticks = 0;
     s_state         = APP_LT_RUNNING;
     s_running       = true;
+    MID_LineTrack_ResetParams();  /* restore full base speed */
 }
 
 void APP_LineTrack_Stop(void)
@@ -439,7 +462,7 @@ void APP_LineTrack_Stop(void)
     s_motor_left.target_speed  = 0.0f;
     s_motor_right.target_speed = 0.0f;
     s_lost_ticks = 0;
-    if (s_total_pulses < APP_LT_TARGET_PULSES) {
+    if (s_state != APP_LT_DONE) {
         s_state = APP_LT_IDLE;  /* manual stop: reset */
     }
     BSP_Motor_Stop();

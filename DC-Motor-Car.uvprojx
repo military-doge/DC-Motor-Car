@@ -395,19 +395,14 @@
               <FilePath>.\app\app_control.c</FilePath>
             </File>
             <File>
-              <FileName>app_line_track.c</FileName>
+              <FileName>app_line_track_high_speed.c</FileName>
               <FileType>1</FileType>
-              <FilePath>.\app\app_line_track.c</FilePath>
+              <FilePath>.\app\app_line_track_high_speed.c</FilePath>
             </File>
             <File>
-              <FileName>app_gyro_task.c</FileName>
+              <FileName>app_line_track_low_speed_straight.c</FileName>
               <FileType>1</FileType>
-              <FilePath>.\app\app_gyro_task.c</FilePath>
-            </File>
-            <File>
-              <FileName>app_gyro_path.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>.\app\app_gyro_path.c</FilePath>
+              <FilePath>.\app\app_line_track_low_speed_straight.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -478,16 +473,6 @@
               <FileName>mid_line_track.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\middleware\mid_line_track.c</FilePath>
-            </File>
-            <File>
-              <FileName>mid_jy62.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>.\middleware\mid_jy62.c</FilePath>
-            </File>
-            <File>
-              <FileName>mid_gyro_hold.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>.\middleware\mid_gyro_hold.c</FilePath>
             </File>
           </Files>
         </Group>

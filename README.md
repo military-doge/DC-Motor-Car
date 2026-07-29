@@ -489,12 +489,14 @@ AI（包括本 AI 及后续 vibe coding 中的 AI）完成代码后，**必须�
 > 校准方法：上电后在 OLED 上观察 Enc A/B 累计脉冲，手动转动轮子恰好一圈，读取脉冲差值。
 > 该值已用于 `app_control.c`、`app_gyro_task.c` 的距离计算。
 
-### 速度闭环 PI (app_control.c)
+### 速度闭环 PI (app_line_track.c)
 
 | 参数 | 数值 | 说明 |
 |------|------|------|
-| KP | 1225 | 增量式离散 PI |
-| KI | 3600 | |
+| KP | 600 | 增量式离散 PI，100Hz |
+| KI | 600 | |
+| PWM max | ±7800 | |
+| Deadband | 0.005 m/s | |
 
 ```
 pwm += KP × (bias - last_bias) + KI × bias
@@ -506,44 +508,44 @@ pwm += KP × (bias - last_bias) + KI × bias
 
 | 参数 | 数值 | 说明 |
 |------|------|------|
-| `MID_TRACK_BASE_SPEED` | 0.50 m/s | 直行速度 |
-| `MID_TRACK_LEFT_BIAS` | 0.02 | 左转死区补偿 |
-| `MID_TRACK_SEARCH_SPEED` | 0.28 m/s | 丢线搜索速度 |
+| `MID_TRACK_BASE_SPEED` | 0.35 m/s | 统一直行/弯道速度（无弯道减速） |
+| `MID_TRACK_SEARCH_SPEED` | 0.15 m/s | 丢线搜索速度 |
 | `MID_TRACK_SEARCH_KP` | 0.038 | 丢线搜索比例增益 |
 | `MID_TRACK_SEARCH_CAP` | 6 | 丢线误差限幅 |
+| Slew rate limit | ±5/tick | 误差变化率限幅，防止入弯跳变 |
 
 **传感器权重 (s_track_weights):**
 
 ```
-[-10, -6, -3, -1, 1, 3, 6, 10]
+[-7, -5, -3, -1, 1, 3, 5, 7]
 ```
 
-**PD 查表 (按 |error| 索引)：**
+**PD 查表 (按 |error| 索引，无衰减表，base_speed 恒定 0.35 m/s)：**
 
-| \|error\| | attenuation | KP | KD | 转弯半径 R |
-|-----------|------------|------|------|-----------|
-| 0 | 1.00 | 0.0058 | 0.0040 | ∞ (直行) |
-| 1 | 0.95 | 0.0090 | 0.006  | ~5.5m |
-| 2 | 0.82 | 0.0144 | 0.009  | ~1.5m |
-| 3 | 0.62 | 0.0140 | 0.009  | ~0.78m |
-| 4 | 0.47 | 0.0114 | 0.007  | ~0.54m |
-| 5 | 0.37 | 0.0090 | 0.006  | ~0.43m |
-| 6 | 0.28 | 0.0148 | 0.0095 | ~0.17m |
-| 7 | 0.22 | 0.0132 | 0.009  | ~0.13m |
+| \|error\| | KP | KD | KD/KP | 转弯半径 R |
+|-----------|------|------|--------|-----------|
+| 0 | 0.0080 | 0.0047 | 0.59 | ∞ (直行) |
+| 1 | 0.0120 | 0.0061 | 0.51 | 3.06m |
+| 2 | 0.0180 | 0.0077 | 0.43 | 1.02m |
+| 3 | 0.0180 | 0.0077 | 0.43 | 0.68m |
+| 4 | 0.0194 | 0.0066 | 0.34 | 0.47m |
+| 5 | 0.0178 | 0.0061 | 0.34 | 0.41m |
+| 6 | 0.0180 | 0.0077 | 0.43 | 0.34m |
+| 7 | 0.0161 | 0.0077 | 0.48 | 0.33m |
 
-> 算法：`error = Σ(w[i] × sensor[i]) / Σ(sensor[i])`
+> **算法流程：**
 >
-> `base_speed = BASE_SPEED × attenuation[|error|]`
+> 1. 加权平均：`error = Σ(w[i] × sensor[i]) / Σ(sensor[i])`，范围 -7..+7
+> 2. Slew rate filter：误差变化每 tick 限幅 ±5，平滑入弯跳变
+> 3. `correction = KP[|error|] × error + KD[|error|] × d(error)/dt`
+> 4. Correction clamp：`|correction| ≤ base_speed` 防止内侧轮反转
+> 5. 差速输出：`left = base_speed + correction`, `right = base_speed - correction`
 >
-> `correction = KP[|error|] × error + KD[|error|] × d(error)/dt`
->
-> `left = base_speed + correction`, `right = base_speed - correction`
->
-> 转弯半径：`R = base_speed × 0.21 / (2 × KP × |error|)`（忽略 KD 项稳态近似）
+> 转弯半径（稳态）：`R = base_speed × track / (2 × KP × |error|) = 0.0735 / (2 × KP × |error|)`
 
 **丢线行为：**
-- 全白 (total_intensity < 1) → 向 `s_last_valid_error` 方向搜索
-- 全黑 (8 路全触发) → 直行
+- 全白 (sum=0) → 向 `s_last_valid_error` 方向搜索，cap 限幅 ±6
+- 全黑 (sum=8) → 直行（十字路口策略）
 
 ## 后续计划
 
