@@ -1,78 +1,78 @@
 #include "app_test.h"
 #include "bsp_servo.h"
-#include "bsp_led.h"
-#include "mid_oled.h"
 
-static bool s_running = false;
-static uint16_t s_angle = 0;
-static int8_t s_direction = 1;
-static uint16_t s_tick = 0;
+/*
+ * Button-triggered servo resolution / range test.
+ *
+ * Alternating on each key press:
+ *   Odd press:  CCW positive, +1deg unit step (rack up a tiny bit)
+ *   Even press: CW reverse,   large step back (rack down a lot)
+ *
+ * Position accumulates.  10ms TimerTick provides settling delay.
+ *
+ * Direction convention (verified with hardware):
+ *   正转 = CCW = angle decreases = rack moves UP
+ *   反转 = CW  = angle increases = rack moves DOWN
+ */
+
+typedef enum {
+    SEQ_IDLE,
+    SEQ_SETTLING,
+} seq_state_t;
+
+static seq_state_t s_state  = SEQ_IDLE;
+static uint8_t     s_tick   = 0;
+static int16_t     s_angle  = 135; /* tracked absolute position */
+static bool        s_odd    = true; /* odd = tiny CCW, even = large CW */
+
+#define UNIT_STEP      1    /*  1deg — smallest practical CCW step */
+#define LARGE_CW_STEP  90   /* 90deg — large CW reversal */
+#define SETTLE_TICKS   30   /* 300ms mechanical settling */
 
 void APP_Test_Init(void)
 {
-    s_running = false;
+    s_state = SEQ_IDLE;
+    s_tick  = 0;
     s_angle = 135;
-    s_direction = 1;
-    s_tick = 0;
+    s_odd   = true;
 }
 
 void APP_Test_TimerTick(void)
 {
-    s_tick++;
-
-    /* Heartbeat: toggle LED every 50 ticks (500ms) to prove ISR is alive */
-    if ((s_tick % 50) == 0) {
-        BSP_LED_Toggle();
+    if (s_state == SEQ_SETTLING) {
+        s_tick++;
+        if (s_tick >= SETTLE_TICKS) {
+            s_state = SEQ_IDLE;
+            s_tick  = 0;
+        }
     }
-
-    if (!s_running) return;
-
-    s_angle += s_direction;
-
-    if (s_angle >= 270) {
-        s_angle = 270;
-        s_direction = -1;
-    } else if (s_angle == 0) {
-        s_direction = 1;
-    }
-
-    BSP_Servo_SetAngle(s_angle);
 }
 
-void APP_Test_Run(void)
-{
-    static uint16_t last_tick = 0;
-    uint16_t pulse;
-
-    /* Refresh OLED every 200ms (20 ticks) */
-    if (s_tick - last_tick < 20 && last_tick != 0) return;
-    last_tick = s_tick;
-
-    MID_OLED_Clear();
-
-    MID_OLED_ShowString(0, 0, s_running ? "SRV ON " : "SRV OFF", 12);
-
-    MID_OLED_ShowString(0, 16, "A:", 12);
-    MID_OLED_ShowNumber(16, 16, s_angle, 3, 12);
-
-    pulse = 500 + (uint32_t)s_angle * 2000 / 270;
-    MID_OLED_ShowString(0, 32, "P:", 12);
-    MID_OLED_ShowNumber(16, 32, pulse, 5, 12);
-
-    MID_OLED_RefreshGram();
-}
+void APP_Test_Run(void) {}
 
 void APP_Test_Start(void)
 {
-    s_running = true;
+    if (s_state != SEQ_IDLE) return;
+
+    if (s_odd) {
+        /* CCW positive: tiny unit step (rack up slightly) */
+        s_angle -= UNIT_STEP;
+        if (s_angle < 0) s_angle = 0;
+    } else {
+        /* CW reverse: large step (rack down a lot) */
+        s_angle += LARGE_CW_STEP;
+        if (s_angle > 270) s_angle = 270;
+    }
+
+    BSP_Servo_SetAngle((uint16_t)s_angle);
+    s_odd    = !s_odd;
+    s_state  = SEQ_SETTLING;
+    s_tick   = 0;
 }
 
-void APP_Test_Stop(void)
-{
-    s_running = false;
-}
+void APP_Test_Stop(void) {}
 
 bool APP_Test_IsRunning(void)
 {
-    return s_running;
+    return (s_state != SEQ_IDLE);
 }

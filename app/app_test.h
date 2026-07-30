@@ -2,6 +2,7 @@
 #define APP_TEST_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 void APP_Test_Init(void);
 void APP_Test_TimerTick(void);
