@@ -263,6 +263,9 @@ void APP_LineTrack_TimerTick(void)
 
     /* 7. Odometry & line tracking (only when running) */
     if (s_running) {
+        /* Stopwatch: only tick while running, stops on forced-stop */
+        s_elapsed_ticks++;
+
         /* Odometry: accumulate absolute encoder pulses */
         s_total_pulses += (count_a > 0 ? count_a : -count_a)
                         + (count_b > 0 ? count_b : -count_b);
@@ -339,8 +342,7 @@ void APP_LineTrack_TimerTick(void)
         &s_motor_right.pwm_output);
     BSP_Motor_SetPWM(pwm_a, pwm_b);
 
-    /* 11. Timing */
-    s_elapsed_ticks++;
+    /* 11. General tick counter (OLED refresh, blink, etc.) */
     s_tick++;
 }
 

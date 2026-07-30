@@ -414,6 +414,11 @@
               <FileType>1</FileType>
               <FilePath>.\app\app_test.c</FilePath>
             </File>
+            <File>
+              <FileName>app_ball_ctrl_1.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\app\app_ball_ctrl_1.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

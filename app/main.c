@@ -47,23 +47,23 @@
 #include "app_control.h"
 // #include "app_line_track_low_speed_circle.h"
 // #include "app_line_track_high_speed.h"
-#include "app_test.h"
+#include "app_ball_ctrl_1.h"
 /* ---- Callback glue (lives in main.c, delegates to app layer) ---- */
 
 static void on_timer_10ms(void)
 {
     BSP_Key_Scan();
-    APP_Test_TimerTick();
+    APP_BallCtrl1_TimerTick();
     BSP_DMA_RX_Process();
 }
 
 static void on_key_click(void)
 {
     BSP_LED_Toggle();
-    if (APP_Test_IsRunning()) {
-        APP_Test_Stop();
+    if (APP_BallCtrl1_IsRunning()) {
+        APP_BallCtrl1_Stop();
     } else {
-        APP_Test_Start();
+        APP_BallCtrl1_Start();
     }
 }
 
@@ -92,7 +92,7 @@ int main(void)
 
     /* [4] App layer init */
     APP_Control_Init();
-    APP_Test_Init();
+    APP_BallCtrl1_Init();
 
     /* [5] Register cross-layer callbacks */
     BSP_Timer_RegisterCallback(on_timer_10ms);
@@ -110,6 +110,6 @@ int main(void)
     /* [7] Main loop */
     while (1) {
         MID_BLE_Poll();
-        APP_Test_Run();
+        APP_BallCtrl1_Run();
     }
 }
