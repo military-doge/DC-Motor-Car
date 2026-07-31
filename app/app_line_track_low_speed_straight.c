@@ -37,6 +37,7 @@
 #include "bsp_grayscale.h"
 #include "bsp_key.h"
 #include "bsp_led.h"
+#include "bsp_servo.h"
 #include "mid_oled.h"
 #include "mid_line_track.h"
 
@@ -48,17 +49,20 @@
 #define APP_LTS_DEADBAND         0.005f
 #define APP_LTS_PWM_MAX          7800
 
-/* ---- Acceleration profile ----
- * Phase 1: 0 → 1.50m uniform acceleration from rest (a ≈ 0.0533 m/s^2)
- * Phase 2: 1.50m → 2.0m constant speed (v_max = 0.40 m/s)
+/* ---- Acceleration profile (triangular: accel + decel, no cruise) ----
+ * Phase 1: 0 → 0.80m uniform acceleration from rest to v_max
+ * Phase 2: 0.80m → 2.0m uniform deceleration to ~0
  * Constraint: avg speed over first 1.5m = 0.2 m/s
- *   v_avg = v_max / 2 = 0.2  →  v_max = 0.40 m/s
- *   a = v_max^2 / (2 * 1.5) = 0.16 / 3.0 ≈ 0.0533 m/s^2
- *   t_accel ≈ 7.5 s,  t_total_2m ≈ 8.75 s
+ *   t_1.5 = (2×0.8 + 2.4×(1-√(1-1.4/2.4))) / v_max = 2.4508/v_max
+ *   v_avg = 1.5 / t_1.5 = 1.5×v_max/2.4508 = 0.2  →  v_max ≈ 0.327 m/s
+ *   a_accel = v_max²/(2×0.8) ≈ 0.0667 m/s²
+ *   a_decel = v_max²/(2×1.2) ≈ 0.0445 m/s²
  */
-#define APP_LTS_ACCEL_DIST_M     1.50f
-#define APP_LTS_ACCEL_MPS2       (0.16f / 3.0f)
-#define APP_LTS_VMAX_MPS         0.40f
+#define APP_LTS_ACCEL_DIST_M     0.80f
+#define APP_LTS_DECEL_DIST_M     1.20f
+#define APP_LTS_ACCEL_MPS2       0.0667f
+#define APP_LTS_DECEL_MPS2       0.0445f
+#define APP_LTS_VMAX_MPS         0.327f
 
 /* Minimum speed floor to overcome static friction at dead start.
  * Without this, v=0 at d=0 → PI bias=0 → no PWM → car stays stuck. */
@@ -86,6 +90,7 @@ static volatile app_lts_motor_t s_motor_right;
 static volatile bool s_running      = false;
 static volatile bool s_done         = false;
 static volatile uint32_t s_tick     = 0;
+static volatile uint32_t s_start_tick = 0;
 static volatile uint16_t s_sensor_data[8];
 
 /* Distance */
@@ -95,6 +100,9 @@ static volatile float   s_distance_m   = 0.0f;
 /* PI accumulator */
 static float s_last_bias_left;
 static float s_last_bias_right;
+
+/* Servo tilt state */
+static float s_servo_angle = 135.0f;
 
 /* ---- Helpers ---- */
 
@@ -163,22 +171,118 @@ static void app_lts_fmt_dist(char *buf, float dist_m)
     buf[pos]   = '\0';
 }
 
-/* ---- Speed profile: acceleration → constant ---- */
+/* ---- Speed profile: acceleration → deceleration (triangular) ---- */
 static float app_lts_calc_target_speed(float dist_m)
 {
     float v;
+    float d_decel_start = APP_LTS_ACCEL_DIST_M;
+
     if (dist_m <= 0.0f) {
         return APP_LTS_VMIN_MPS;
     }
-    if (dist_m < APP_LTS_ACCEL_DIST_M) {
-        /* Uniform acceleration: v = sqrt(2 * a * d) */
+    if (dist_m < d_decel_start) {
+        /* Phase 1: uniform acceleration, v = sqrt(2 * a * d) */
         v = sqrtf(2.0f * APP_LTS_ACCEL_MPS2 * dist_m);
         if (v < APP_LTS_VMIN_MPS) {
             v = APP_LTS_VMIN_MPS;
         }
         return (v < APP_LTS_VMAX_MPS) ? v : APP_LTS_VMAX_MPS;
     }
-    return APP_LTS_VMAX_MPS;
+    /* Phase 2: uniform deceleration, v = sqrt(v_max² - 2 * a_decel * (d - d_accel)) */
+    {
+        float d_into_decel = dist_m - d_decel_start;
+        float v_sq = APP_LTS_VMAX_MPS * APP_LTS_VMAX_MPS
+                     - 2.0f * APP_LTS_DECEL_MPS2 * d_into_decel;
+        if (v_sq <= 0.0f) {
+            return 0.0f;
+        }
+        v = sqrtf(v_sq);
+        return v;
+    }
+}
+
+/* ---- Servo tilt compensation ----
+ *
+ * Physics (measured kinematics, 2026-07-30):
+ *   a_ball = 0.0110 × |Δθ_servo|  [m/s²]  (magnitude, from φ=0.064×Δθ and a=g×φ)
+ *   Car accel:  a_accel = 0.0667 m/s²  →  Δθ = 6.1° to cancel exactly
+ *   Car decel:  a_decel = 0.0445 m/s²  →  Δθ = 4.1° to cancel exactly
+ * Add ~2° margin for pipe friction → steady-state: 8° accel, 6° decel.
+ *
+ * Direction (实测):
+ *   Accel → ball lags backward → need ball→+cm → CCW 逆转 (angle decrease)
+ *   Decel → ball lunges forward → need ball→-cm → CW 正转 (angle increase)
+ */
+#define SERVO_ACCEL_KICK_DEG    18.0f   /* initial kick CCW (break static friction) */
+#define SERVO_ACCEL_KICK_TICKS  15      /* kick duration: 150ms */
+#define SERVO_ACCEL_SETTLE_TICKS 5      /* settle from kick→hold: 50ms */
+#define SERVO_ACCEL_HOLD_DEG    12.0f   /* steady compensation CCW */
+#define SERVO_DECEL_HOLD_DEG    6.0f    /* steady compensation CW */
+#define SERVO_DECEL_RAMP_M      0.10f   /* ramp-in distance at start of decel */
+#define SERVO_TAPER_M           0.10f   /* taper-out distance before phase end */
+
+static void app_lts_update_servo(float dist_m)
+{
+    float desired = 135.0f;
+
+    if (!s_running) {
+        s_servo_angle = 135.0f;
+        BSP_Servo_SetAngle(135);
+        return;
+    }
+
+    if (dist_m < APP_LTS_ACCEL_DIST_M) {
+        /* === Acceleration phase: CCW 逆转 → ball → +cm === */
+        uint32_t elapsed = s_tick - s_start_tick;
+        float remaining = APP_LTS_ACCEL_DIST_M - dist_m;
+
+        if (elapsed < SERVO_ACCEL_KICK_TICKS) {
+            /* Fast kick to break static friction: 0 → 18° CCW */
+            float frac = (float)elapsed / (float)SERVO_ACCEL_KICK_TICKS;
+            desired = 135.0f - SERVO_ACCEL_KICK_DEG * frac;
+        } else if (elapsed < SERVO_ACCEL_KICK_TICKS + SERVO_ACCEL_SETTLE_TICKS) {
+            /* Quick settle: kick → hold over SETTLE_TICKS */
+            float frac = (float)(elapsed - SERVO_ACCEL_KICK_TICKS)
+                         / (float)SERVO_ACCEL_SETTLE_TICKS;
+            desired = 135.0f - (SERVO_ACCEL_KICK_DEG
+                       - (SERVO_ACCEL_KICK_DEG - SERVO_ACCEL_HOLD_DEG) * frac);
+        } else if (remaining < SERVO_TAPER_M) {
+            /* Taper to 0° near end of accel (last 10cm) */
+            float frac = remaining / SERVO_TAPER_M;  /* 1 → 0 */
+            desired = 135.0f - SERVO_ACCEL_HOLD_DEG * frac;
+        } else {
+            /* Steady compensation: hold ACCEL_HOLD CCW */
+            desired = 135.0f - SERVO_ACCEL_HOLD_DEG;
+        }
+    } else if (dist_m < APP_LTS_TARGET_DIST_M) {
+        /* === Deceleration phase: CW 正转 → ball → -cm === */
+        float d_into = dist_m - APP_LTS_ACCEL_DIST_M;
+        float remaining = APP_LTS_TARGET_DIST_M - dist_m;
+
+        if (d_into < SERVO_DECEL_RAMP_M) {
+            /* Smooth ramp into CW tilt over first 10cm */
+            float frac = d_into / SERVO_DECEL_RAMP_M;
+            desired = 135.0f + SERVO_DECEL_HOLD_DEG * frac;
+        } else if (remaining < SERVO_TAPER_M) {
+            /* Taper to 0° near end of decel (last 10cm) */
+            float frac = remaining / SERVO_TAPER_M;
+            desired = 135.0f + SERVO_DECEL_HOLD_DEG * frac;
+        } else {
+            /* Steady compensation: hold 6° CW */
+            desired = 135.0f + SERVO_DECEL_HOLD_DEG;
+        }
+    }
+
+    /* Slew rate limit: 3°/tick for smooth motion */
+    {
+        float diff = desired - s_servo_angle;
+        float max_step = 3.0f;
+        if (diff > max_step) diff = max_step;
+        if (diff < -max_step) diff = -max_step;
+        s_servo_angle += diff;
+    }
+
+    BSP_Servo_SetAngle((uint16_t)(s_servo_angle + 0.5f));
 }
 
 /* ---- Public API ---- */
@@ -199,6 +303,10 @@ void APP_LineTrack_LowSpeedStraight_Init(void)
 
     /* Set initial base speed (starts from 0, ramps up per acceleration profile) */
     MID_LineTrack_SetBaseSpeed(0.0f);
+
+    /* Servo to center */
+    s_servo_angle = 135.0f;
+    BSP_Servo_SetAngle(135);
 }
 
 /*
@@ -254,12 +362,16 @@ void APP_LineTrack_LowSpeedStraight_TimerTick(void)
         s_done    = true;
         s_motor_left.target_speed  = 0.0f;
         s_motor_right.target_speed = 0.0f;
+        s_servo_angle = 135.0f;
+        BSP_Servo_SetAngle(135);
         BSP_Motor_Stop();
         return;
     }
 
     /* 8. Stop check */
     if (!s_running) {
+        s_servo_angle = 135.0f;
+        BSP_Servo_SetAngle(135);
         BSP_Motor_Stop();
         return;
     }
@@ -281,6 +393,9 @@ void APP_LineTrack_LowSpeedStraight_TimerTick(void)
         s_motor_right.target_speed, &s_last_bias_right,
         &s_motor_right.pwm_output);
     BSP_Motor_SetPWM(pwm_a, pwm_b);
+
+    /* 9.5 Servo tilt compensation */
+    app_lts_update_servo(s_distance_m);
 
     s_tick++;
 }
@@ -314,13 +429,28 @@ void APP_LineTrack_LowSpeedStraight_Run(void)
             MID_OLED_ShowString(90, 20, "m", 12);
         }
         {
-            float avg = s_distance_m / ((float)s_tick * 0.01f);
+            float elapsed = (float)(s_tick - s_start_tick) * 0.01f;
+            float avg = s_distance_m / elapsed;
             char sbuf[5];
+            char tbuf[8];
+            uint16_t sec;
+            uint16_t ds;
             app_lts_fmt_speed(sbuf, avg);
             sbuf[4] = '\0';
             MID_OLED_ShowString(0, 40, "Avg:", 12);
             MID_OLED_ShowString(36, 40, sbuf, 12);
             MID_OLED_ShowString(66, 40, "cm/s", 12);
+            /* elapsed time */
+            sec = (uint16_t)elapsed;
+            ds  = (uint16_t)(elapsed * 10.0f) % 10;
+            tbuf[0] = '0' + (sec / 10) % 10;
+            tbuf[1] = '0' + sec % 10;
+            tbuf[2] = '.';
+            tbuf[3] = '0' + ds;
+            tbuf[4] = 's';
+            tbuf[5] = '\0';
+            MID_OLED_ShowString(0, 52, "Time:", 12);
+            MID_OLED_ShowString(42, 52, tbuf, 12);
         }
     } else if (!s_running) {
         MID_OLED_ShowString(12, 0, "LOW SPD STR", 12);
@@ -354,8 +484,21 @@ void APP_LineTrack_LowSpeedStraight_Run(void)
             MID_OLED_ShowString(54, 40, "/2.00m", 12);
         }
 
-        /* Line 52: status */
-        MID_OLED_ShowString(0, 52, "RUN", 12);
+        /* Line 52: status + elapsed time */
+        {
+            float elapsed = (float)(s_tick - s_start_tick) * 0.01f;
+            char tbuf[8];
+            uint16_t sec = (uint16_t)elapsed;
+            uint16_t ds = (uint16_t)(elapsed * 10.0f) % 10;
+            tbuf[0] = '0' + (sec / 10) % 10;
+            tbuf[1] = '0' + sec % 10;
+            tbuf[2] = '.';
+            tbuf[3] = '0' + ds;
+            tbuf[4] = 's';
+            tbuf[5] = '\0';
+            MID_OLED_ShowString(0, 52, "RUN T:", 12);
+            MID_OLED_ShowString(42, 52, tbuf, 12);
+        }
     }
 
     MID_OLED_RefreshGram();
@@ -371,6 +514,7 @@ void APP_LineTrack_LowSpeedStraight_Start(void)
     s_total_pulses = 0;
     s_distance_m   = 0.0f;
     s_done         = false;
+    s_start_tick   = s_tick;
     s_running      = true;
 }
 
@@ -380,6 +524,8 @@ void APP_LineTrack_LowSpeedStraight_Stop(void)
     s_done    = false;
     s_motor_left.target_speed  = 0.0f;
     s_motor_right.target_speed = 0.0f;
+    s_servo_angle = 135.0f;
+    BSP_Servo_SetAngle(135);
     BSP_Motor_Stop();
 }
 

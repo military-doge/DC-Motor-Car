@@ -1,72 +1,72 @@
 #include "app_ball_ctrl_1.h"
 #include "bsp_servo.h"
+#include "bsp_delay.h"
+#include "mid_k230.h"
 #include "mid_oled.h"
+#include <stdlib.h>
+#include <math.h>
 
 /*
- * Q3 open-loop bang-bang controller — timed sequence, no sensor.
+ * Q3 pure visual closed-loop PID controller.
  *
- * Strategy (large-angle → gravity dominates friction):
+ * Sequence: IDLE → TO_P5 (O→+5cm) → TO_M5 (+5cm→-5cm) → DONE
+ * Each phase uses full PID authority — no open-loop base angle.
+ * State transitions driven by position arrival, not time.
  *
- *   1. ACCEL:   CCW large angle  → ball rolls toward +5cm
- *   2. BRAKE1:  CW angle BEFORE ball reaches +5cm → decelerate
- *               so ball arrives at +5cm with v≈0
- *   3. COAST:   hold same CW angle as BRAKE1 → ball reverses,
- *               rolls back past 0 toward -5cm
- *   4. BRAKE2:  CCW angle BEFORE ball reaches -5cm → decelerate,
- *               ball stops at -5cm
- *   5. SETTLE:  hold near-center angle → stabilize ball at target
+ * Control law (per README authoritative formula):
+ *   error = target - pos         (pos from MID_K230_GetPosition(), mm)
+ *   correction = KP * error      (KP < 0, empirically verified direction)
+ *   servo_offset += correction   (incremental accumulation = integral action)
  *
- *   Total travel: O → +5cm → -5cm (≤5s, err ≤±1cm per competition)
- *
- * Direction (实测 — opposite of README, likely servo mounted reversed):
+ * Direction (实测, 权威方向表):
  *   CCW / 逆转 = angle < 135° = ball → +cm
  *   CW  / 正转 = angle > 135° = ball → -cm
- *
- *   offset sign in set_servo():
- *     +offset → CW  → ball → -cm (decelerate +cm motion)
- *     -offset → CCW → ball → +cm (accelerate +cm motion)
+ *   +offset → CW  → ball → -cm
+ *   -offset → CCW → ball → +cm
  *
  * Gear-rack kinematics (L = 244mm measured):
- *   Pipe tilt:  φ(deg) = -0.064 × Δθ_servo  (φ>0 = upward)
- *   Ball accel: a(m/s²) = -0.011 × Δθ_servo
+ *   Pipe tilt:  φ(deg) = +0.064 × Δθ_servo  (φ>0 = 上倾)
+ *   Ball accel: a(m/s²) = +0.011 × Δθ_servo  (+a = 球→-cm)
  *   PWM:        PWM = 1500 + Δθ × 7.407
- *
- * All timing & angle values are tunable — tune with BLE !BALL log if
- * available, or by watching the ball and adjusting.
  */
 
 /* ========== tunable parameters ========== */
 
-#define SERVO_CENTER_DEG      135     /* horizontal (ball stable) */
+#define SERVO_CENTER_DEG      135     /* horizontal */
 
-/* --- Phase 1: accelerate right via CCW (ball → +cm) --- */
-#define ACCEL_ANGLE           50      /* servo ° offset — set_servo(-ACCEL) = CCW */
-#define ACCEL_TICKS           40      /* duration (×10ms = 400ms) */
+/* --- Vision PID gains (实测验证方向, KP/KI/KD < 0) --- */
+#define VISION_KP              -3.0f   /* P gain deg/mm */
+#define VISION_KI              -0.10f  /* I gain deg/mm/s */
+#define VISION_KD              -3.0f   /* D gain deg per mm/s (微分先行) */
+#define VISION_I_MAX            45.0f  /* integral clamp ±deg */
+#define VISION_I_ERR_THR        20.0f  /* integral separation: only integrate when |error| < this */
+#define VISION_DATA_TIMEOUT_MS 200     /* K230 data age threshold ms */
 
-/* --- Phase 2: brake BEFORE +5cm via CW (ball → -cm, opposing motion) --- */
-#define BRAKE1_ANGLE          25      /* servo ° offset — set_servo(+BRAKE1) = CW */
-#define BRAKE1_TICKS          25      /* duration (×10ms = 250ms) */
+/* --- Dither (high-frequency micro-vibration to break static friction) --- */
+#define DITHER_AMP_DEG          0.0f   /* dither amplitude deg (disabled) */
+#define DITHER_FREQ_HZ          12.0f  /* dither frequency Hz */
 
-/* --- Phase 3: hold CW, ball rolls back past 0 toward -5cm (same angle as BRAKE1) --- */
-#define COAST_TICKS           100     /* duration (×10ms = 1000ms), angle = BRAKE1_ANGLE */
+/* --- Stuck detection (ball not moving despite servo action) --- */
+#define STUCK_VEL_THR_MM_S      5.0f   /* velocity below this = stuck (mm/s) */
+#define STUCK_POS_THR_MM        20.0f  /* position far from target (mm) */
+#define STUCK_BOOST_DEG         8.0f   /* extra deg when stuck detected */
 
-/* --- Phase 4: brake BEFORE -5cm via CCW (ball → +cm, opposing motion) --- */
-#define BRAKE2_ANGLE          40      /* servo ° offset — set_servo(-BRAKE2) = CCW */
-#define BRAKE2_TICKS          40      /* duration (×10ms = 400ms) */
+/* --- PID output clamp (±deg, symmetric) --- */
+#define PID_CLAMP_DEG           30.0f  /* full PID authority for movement */
 
-/* --- Phase 5: stabilize at target --- */
-#define SETTLE_ANGLE          0       /* servo ° offset from center (0 = horizontal, tune if drifts) */
-#define SETTLE_TICKS          50      /* hold before declaring done */
+/* --- Phase targets and arrival detection --- */
+#define TARGET_P5_MM            50     /* +5cm */
+#define TARGET_M5_MM           -50     /* -5cm */
+#define ARRIVE_THR_MM           10     /* ±10mm = arrived per competition ±1cm */
+#define ARRIVE_COUNT            10     /* consecutive frames to confirm arrival */
+#define TOTAL_TIMEOUT_TICKS     500    /* 5s total timeout */
 
 /* ========== internal types ========== */
 
 typedef enum {
     STATE_IDLE,
-    STATE_ACCEL,
-    STATE_BRAKE1,
-    STATE_COAST,
-    STATE_BRAKE2,
-    STATE_SETTLE,
+    STATE_TO_P5,     /* moving ball from O → +5cm */
+    STATE_TO_M5,     /* moving ball from +5cm → -5cm */
     STATE_DONE,
 } state_t;
 
@@ -77,6 +77,20 @@ static uint16_t s_tick        = 0;    /* tick within current phase */
 static uint16_t s_total_ticks = 0;    /* total elapsed since Start */
 static uint16_t s_disp_tick   = 0;
 
+/* ---- Vision PID state ---- */
+static float    s_prev_k230_pos;        /* previous K230 position mm */
+static uint32_t s_prev_k230_ts;         /* previous K230 timestamp ms */
+static float    s_i_accum       = 0.0f; /* integral accumulator deg */
+static float    s_dither_phase  = 0.0f; /* dither phase rad */
+static float    s_ball_velocity = 0.0f; /* ball velocity mm/s */
+static float    s_vision_trim   = 0.0f; /* latest vision trim deg */
+static float    s_k230_pos      = 0.0f; /* latest K230 position mm */
+static float    s_k230_error    = 0.0f; /* latest error mm */
+static bool     s_k230_has_prev = false;/* whether previous frame exists for dt calc */
+static uint8_t  s_arrive_cnt    = 0;    /* consecutive within-threshold frames */
+static float    s_target_mm     = 0.0f; /* current phase target mm */
+static int16_t  s_servo_angle   = 135;   /* current servo angle deg (for display) */
+
 /* ========== helpers ========== */
 
 static void set_servo(int16_t offset_deg)
@@ -84,26 +98,120 @@ static void set_servo(int16_t offset_deg)
     int16_t angle = SERVO_CENTER_DEG + offset_deg;
     if (angle < 0)   angle = 0;
     if (angle > 270) angle = 270;
+    s_servo_angle = angle;
     BSP_Servo_SetAngle(angle);
+}
+
+/*
+ * Unified vision PID trim computation.
+ * Returns trim clipped to ±clamp_deg, or 0.0f if K230 data unavailable.
+ */
+static float compute_vision_trim(float target_mm, float clamp_deg)
+{
+    float    pos, error_mm, dt, vel, abs_err;
+    float    p_term, d_term, dither, stuck_boost, abs_vel, trim;
+    uint32_t age, k230_ts;
+    int32_t  diff;
+
+    /* ---- check K230 data freshness ---- */
+    age = BSP_Delay_GetTick() - MID_K230_GetLastUpdate();
+    if (!(MID_K230_IsDetected() && (MID_K230_GetLastUpdate() > 0)
+            && (age < VISION_DATA_TIMEOUT_MS))) {
+        return 0.0f;
+    }
+
+    pos      = MID_K230_GetPosition();
+    k230_ts  = MID_K230_GetTimestamp();
+    error_mm = target_mm - pos;
+
+    /* ---- dt from K230 timestamps (ms → s), velocity (mm/s) ---- */
+    diff = (int32_t)(k230_ts - s_prev_k230_ts);
+    if (s_k230_has_prev && diff > 0 && diff < 500) {
+        /* New K230 frame: compute velocity from actual dt */
+        dt = (float)diff / 1000.0f;
+        vel = (pos - s_prev_k230_pos) / dt;
+        s_ball_velocity = vel;
+        s_prev_k230_pos = pos;
+        s_prev_k230_ts  = k230_ts;
+    } else if (s_k230_has_prev) {
+        /* Same frame: keep previous velocity, don't reset to 0 */
+        vel = s_ball_velocity;
+    } else {
+        /* First frame: no velocity yet */
+        vel = 0.0f;
+        s_ball_velocity = 0.0f;
+        s_prev_k230_pos = pos;
+        s_prev_k230_ts  = k230_ts;
+        s_k230_has_prev = true;
+    }
+
+    s_k230_pos      = pos;
+    s_k230_error    = error_mm;
+
+    /* ---- P term ---- */
+    p_term = VISION_KP * error_mm;
+
+    /* ---- I term (conditional accumulation + anti-windup) ---- */
+    abs_err = error_mm < 0 ? -error_mm : error_mm;
+    if (abs_err < VISION_I_ERR_THR) {
+        s_i_accum += VISION_KI * error_mm * dt;
+        if (s_i_accum > +VISION_I_MAX) s_i_accum = +VISION_I_MAX;
+        if (s_i_accum < -VISION_I_MAX) s_i_accum = -VISION_I_MAX;
+    }
+
+    /* ---- D term (derivative-on-measurement) ---- */
+    d_term = VISION_KD * (-vel);
+
+    /* ---- Dither ---- */
+    dither = DITHER_AMP_DEG * (float)sin((double)s_dither_phase);
+
+    /* ---- Stuck detection ---- */
+    stuck_boost = 0.0f;
+    abs_vel = vel < 0 ? -vel : vel;
+    if (abs_vel < STUCK_VEL_THR_MM_S && abs_err > STUCK_POS_THR_MM && s_k230_has_prev) {
+        stuck_boost = (error_mm > 0) ? -STUCK_BOOST_DEG : +STUCK_BOOST_DEG;
+    }
+
+    /* ---- Sum and clip ---- */
+    trim = p_term + s_i_accum + d_term + dither + stuck_boost;
+
+    if (trim > +clamp_deg) trim = +clamp_deg;
+    if (trim < -clamp_deg) trim = -clamp_deg;
+
+    return trim;
+}
+
+/*
+ * Reset vision PID state for phase transition.
+ */
+static void vision_reset(void)
+{
+    s_i_accum        = 0.0f;
+    s_dither_phase   = 0.0f;
+    s_ball_velocity  = 0.0f;
+    s_vision_trim    = 0.0f;
+    s_k230_pos       = 0.0f;
+    s_k230_error     = 0.0f;
+    s_k230_has_prev  = false;
+    s_prev_k230_pos  = 0.0f;
+    s_prev_k230_ts   = 0;
+    s_arrive_cnt     = 0;
 }
 
 static const char *state_name(state_t s)
 {
     switch (s) {
-    case STATE_IDLE:   return "IDLE";
-    case STATE_ACCEL:  return "ACCEL";
-    case STATE_BRAKE1: return "BRAKE1";
-    case STATE_COAST:  return "COAST";
-    case STATE_BRAKE2: return "BRAKE2";
-    case STATE_SETTLE: return "SETTLE";
-    case STATE_DONE:   return "DONE";
+    case STATE_IDLE:  return "IDLE";
+    case STATE_TO_P5: return "TO_P5";
+    case STATE_TO_M5: return "TO_M5";
+    case STATE_DONE:  return "DONE";
     }
     return "?";
 }
 
 static void fmt_time(char *buf, uint16_t ticks)
 {
-    uint16_t cs = ticks;         /* centiseconds */
+    uint16_t cs = ticks;
     uint16_t sec = cs / 100;
     uint16_t frac = cs % 100;
     buf[0] = '0' + (sec / 10) % 10;
@@ -116,6 +224,55 @@ static void fmt_time(char *buf, uint16_t ticks)
     buf[7] = '\0';
 }
 
+static void show_k230_pos(uint8_t x, uint8_t y)
+{
+    char buf[10];
+    if (MID_K230_IsDetected()) {
+        float    pos = MID_K230_GetPosition();
+        int32_t  v   = (int32_t)(pos >= 0 ? pos + 0.5f : pos - 0.5f);
+        uint8_t  p   = 0;
+        buf[p++] = (v < 0) ? '-' : '+';
+        if (v < 0) v = -v;
+        buf[p++] = '0' + (v / 100) % 10;
+        buf[p++] = '0' + (v / 10) % 10;
+        buf[p++] = '0' + (v % 10);
+        buf[p++] = 'm'; buf[p++] = 'm'; buf[p] = '\0';
+        MID_OLED_ShowString(x, y, buf, 12);
+    } else {
+        MID_OLED_ShowString(x, y, "  -- mm", 12);
+    }
+}
+
+static void show_vision_trim(uint8_t x, uint8_t y)
+{
+    char buf[7];
+    int16_t v = (int16_t)(s_vision_trim >= 0 ? s_vision_trim + 0.5f : s_vision_trim - 0.5f);
+    uint8_t p = 0;
+    if (v < 0) { buf[p++] = '-'; v = (int16_t)(-v); }
+    else       { buf[p++] = '+'; }
+    if (v >= 100)      { buf[p++] = '0' + (v / 100) % 10; }
+    if (v >= 10)       { buf[p++] = '0' + (v / 10) % 10; }
+    buf[p++] = '0' + (v % 10);
+    buf[p++] = 'd';
+    buf[p]   = '\0';
+    MID_OLED_ShowString(x, y, buf, 12);
+}
+
+/* Display target mm (e.g. "+050" or "-050") */
+static void show_target(uint8_t x, uint8_t y, int16_t target_mm)
+{
+    char buf[5];
+    uint8_t p = 0;
+    int16_t v = target_mm;
+    buf[p++] = (v < 0) ? '-' : '+';
+    if (v < 0) v = (int16_t)(-v);
+    buf[p++] = '0' + (v / 100) % 10;
+    buf[p++] = '0' + (v / 10) % 10;
+    buf[p++] = '0' + (v % 10);
+    buf[p]   = '\0';
+    MID_OLED_ShowString(x, y, buf, 12);
+}
+
 /* ========== public API ========== */
 
 void APP_BallCtrl1_Init(void)
@@ -124,10 +281,12 @@ void APP_BallCtrl1_Init(void)
     s_tick        = 0;
     s_total_ticks = 0;
     s_disp_tick   = 0;
+    s_target_mm   = 0.0f;
+    vision_reset();
     BSP_Servo_SetAngle(SERVO_CENTER_DEG);
 
     MID_OLED_Clear();
-    MID_OLED_ShowString(16, 0, "Q3 BANG-BANG", 16);
+    MID_OLED_ShowString(16, 0, "Q3 CLOSED-LOOP", 16);
     MID_OLED_ShowString(0, 22, "O -> +5 -> -5 cm", 12);
     MID_OLED_ShowString(0, 38, "Key = Start", 12);
     MID_OLED_RefreshGram();
@@ -143,45 +302,74 @@ void APP_BallCtrl1_TimerTick(void)
     s_disp_tick++;
     s_tick++;
 
-    /* State transitions are purely time-driven */
+    /* Advance dither phase each tick (100Hz) */
+    s_dither_phase += 2.0f * 3.14159f * DITHER_FREQ_HZ / 100.0f;
+    if (s_dither_phase > 6.28318f) s_dither_phase -= 6.28318f;
+
+    /* Global timeout */
+    if (s_total_ticks >= TOTAL_TIMEOUT_TICKS) {
+        s_state = STATE_DONE;
+        s_tick  = 0;
+        set_servo(0);
+        return;
+    }
+
+    float   trim;
+    int16_t target;
+
     switch (s_state) {
 
-    case STATE_ACCEL:
-        if (s_tick >= ACCEL_TICKS) {
-            s_state = STATE_BRAKE1;
-            s_tick  = 0;
-            set_servo(BRAKE1_ANGLE);
+    case STATE_TO_P5:
+        /*
+         * Pure PID: drive ball from O to +5cm.
+         * No open-loop base. PID + dither + stuck detection.
+         */
+        target = TARGET_P5_MM;
+        s_target_mm = (float)target;
+        trim   = compute_vision_trim((float)target, PID_CLAMP_DEG);
+        s_vision_trim = trim;
+        set_servo((int16_t)trim);
+
+        /* Arrival detection */
+        {
+            float abs_err = s_k230_error < 0 ? -s_k230_error : s_k230_error;
+            if (abs_err < (float)ARRIVE_THR_MM) {
+                s_arrive_cnt++;
+                if (s_arrive_cnt >= ARRIVE_COUNT) {
+                    /* Arrived at +5cm → switch to TO_M5 */
+                    s_state = STATE_TO_M5;
+                    s_tick  = 0;
+                    vision_reset();  /* fresh PID for reverse direction */
+                }
+            } else {
+                s_arrive_cnt = 0;
+            }
         }
         break;
 
-    case STATE_BRAKE1:
-        if (s_tick >= BRAKE1_TICKS) {
-            s_state = STATE_COAST;
-            s_tick  = 0;
-            set_servo(BRAKE1_ANGLE);  /* hold same angle as BRAKE1, ball reverses */
-        }
-        break;
+    case STATE_TO_M5:
+        /*
+         * Pure PID: drive ball from +5cm to -5cm.
+         */
+        target = TARGET_M5_MM;
+        s_target_mm = (float)target;
+        trim   = compute_vision_trim((float)target, PID_CLAMP_DEG);
+        s_vision_trim = trim;
+        set_servo((int16_t)trim);
 
-    case STATE_COAST:
-        if (s_tick >= COAST_TICKS) {
-            s_state = STATE_BRAKE2;
-            s_tick  = 0;
-            set_servo(-BRAKE2_ANGLE);
-        }
-        break;
-
-    case STATE_BRAKE2:
-        if (s_tick >= BRAKE2_TICKS) {
-            s_state = STATE_SETTLE;
-            s_tick  = 0;
-            set_servo(SETTLE_ANGLE);  /* stabilize at target, tune if ball drifts */
-        }
-        break;
-
-    case STATE_SETTLE:
-        if (s_tick >= SETTLE_TICKS) {
-            s_state = STATE_DONE;
-            s_tick  = 0;
+        /* Arrival detection */
+        {
+            float abs_err = s_k230_error < 0 ? -s_k230_error : s_k230_error;
+            if (abs_err < (float)ARRIVE_THR_MM) {
+                s_arrive_cnt++;
+                if (s_arrive_cnt >= ARRIVE_COUNT) {
+                    s_state = STATE_DONE;
+                    s_tick  = 0;
+                    set_servo(0);
+                }
+            } else {
+                s_arrive_cnt = 0;
+            }
         }
         break;
 
@@ -201,67 +389,128 @@ void APP_BallCtrl1_Run(void)
     switch (s_state) {
 
     case STATE_IDLE:
-        MID_OLED_ShowString(16, 0, "Q3 BANG-BANG", 16);
+        MID_OLED_ShowString(16, 0, "Q3 CLOSED-LOOP", 16);
         MID_OLED_ShowString(0, 22, "O -> +5 -> -5 cm", 12);
-        MID_OLED_ShowString(0, 38, "Key = Start", 12);
+        MID_OLED_ShowString(0, 38, "SA:", 12);
+        MID_OLED_ShowNumber(18, 38, (uint32_t)s_servo_angle, 3, 12);
+        MID_OLED_ShowString(0, 52, "Key = Start", 12);
         break;
 
-    case STATE_ACCEL:
+    case STATE_TO_P5:
         MID_OLED_ShowString(28, 0, "Q3 -> +5 cm", 16);
-        MID_OLED_ShowString(0, 22, "Phase: ACCEL", 12);
-        MID_OLED_ShowString(0, 34, "Servo: -", 12);
-        MID_OLED_ShowNumber(54, 34, ACCEL_ANGLE, 3, 12);
-        MID_OLED_ShowString(78, 34, "deg", 12);
+        /* Row 1: position | target */
+        MID_OLED_ShowString(0, 16, "P:", 12);
+        show_k230_pos(18, 16);
+        MID_OLED_ShowString(84, 16, "T:", 12);
+        show_target(96, 16, TARGET_P5_MM);
+        /* Row 2: error | trim */
+        MID_OLED_ShowString(0, 28, "E:", 12);
+        {
+            int32_t v = (int32_t)(s_k230_error >= 0 ? s_k230_error + 0.5f : s_k230_error - 0.5f);
+            char tbuf[7];
+            uint8_t p = 0;
+            if (v < 0) { tbuf[p++] = '-'; v = -v; }
+            else       { tbuf[p++] = '+'; }
+            tbuf[p++] = '0' + (v / 10) % 10;
+            tbuf[p++] = '0' + (v % 10);
+            tbuf[p++] = 'm'; tbuf[p++] = 'm'; tbuf[p] = '\0';
+            MID_OLED_ShowString(18, 28, tbuf, 12);
+        }
+        MID_OLED_ShowString(54, 28, "V:", 12);
+        show_vision_trim(72, 28);
+        /* Row 3: servo angle | I accum */
+        MID_OLED_ShowString(0, 40, "SA:", 12);
+        MID_OLED_ShowNumber(18, 40, (uint32_t)s_servo_angle, 3, 12);
+        {
+            int32_t v = (int32_t)(s_i_accum >= 0 ? s_i_accum + 0.5f : s_i_accum - 0.5f);
+            char tbuf[7];
+            uint8_t p = 0;
+            MID_OLED_ShowString(54, 40, "I:", 12);
+            if (v < 0) { tbuf[p++] = '-'; v = -v; }
+            else       { tbuf[p++] = '+'; }
+            tbuf[p++] = '0' + (v / 10) % 10;
+            tbuf[p++] = '0' + (v % 10);
+            tbuf[p++] = 'd'; tbuf[p] = '\0';
+            MID_OLED_ShowString(72, 40, tbuf, 12);
+        }
+        /* Row 4: arrive count | time */
+        MID_OLED_ShowString(0, 52, "C:", 12);
+        MID_OLED_ShowNumber(12, 52, s_arrive_cnt, 2, 12);
+        MID_OLED_ShowString(24, 52, "/", 12);
+        MID_OLED_ShowNumber(30, 52, ARRIVE_COUNT, 2, 12);
         fmt_time(buf, s_total_ticks);
-        MID_OLED_ShowString(0, 48, buf, 12);
+        MID_OLED_ShowString(60, 52, buf, 12);
         break;
 
-    case STATE_BRAKE1:
-        MID_OLED_ShowString(28, 0, "Q3 -> +5 cm", 16);
-        MID_OLED_ShowString(0, 22, "Phase: BRAKE1", 12);
-        MID_OLED_ShowString(0, 34, "Servo: +", 12);
-        MID_OLED_ShowNumber(54, 34, BRAKE1_ANGLE, 3, 12);
-        MID_OLED_ShowString(78, 34, "deg", 12);
-        fmt_time(buf, s_total_ticks);
-        MID_OLED_ShowString(0, 48, buf, 12);
-        break;
-
-    case STATE_COAST:
-        MID_OLED_ShowString(28, 0, "Q3 <- BACK", 16);
-        MID_OLED_ShowString(0, 22, "Phase: COAST", 12);
-        MID_OLED_ShowString(0, 34, "Servo: +", 12);
-        MID_OLED_ShowNumber(54, 34, BRAKE1_ANGLE, 3, 12);
-        MID_OLED_ShowString(78, 34, "deg", 12);
-        fmt_time(buf, s_total_ticks);
-        MID_OLED_ShowString(0, 48, buf, 12);
-        break;
-
-    case STATE_BRAKE2:
+    case STATE_TO_M5:
         MID_OLED_ShowString(28, 0, "Q3 -> -5 cm", 16);
-        MID_OLED_ShowString(0, 22, "Phase: BRAKE2", 12);
-        MID_OLED_ShowString(0, 34, "Servo: -", 12);
-        MID_OLED_ShowNumber(54, 34, BRAKE2_ANGLE, 3, 12);
-        MID_OLED_ShowString(78, 34, "deg", 12);
+        /* Row 1: position | target */
+        MID_OLED_ShowString(0, 16, "P:", 12);
+        show_k230_pos(18, 16);
+        MID_OLED_ShowString(84, 16, "T:", 12);
+        show_target(96, 16, TARGET_M5_MM);
+        /* Row 2: error | trim */
+        MID_OLED_ShowString(0, 28, "E:", 12);
+        {
+            int32_t v = (int32_t)(s_k230_error >= 0 ? s_k230_error + 0.5f : s_k230_error - 0.5f);
+            char tbuf[7];
+            uint8_t p = 0;
+            if (v < 0) { tbuf[p++] = '-'; v = -v; }
+            else       { tbuf[p++] = '+'; }
+            tbuf[p++] = '0' + (v / 10) % 10;
+            tbuf[p++] = '0' + (v % 10);
+            tbuf[p++] = 'm'; tbuf[p++] = 'm'; tbuf[p] = '\0';
+            MID_OLED_ShowString(18, 28, tbuf, 12);
+        }
+        MID_OLED_ShowString(54, 28, "V:", 12);
+        show_vision_trim(72, 28);
+        /* Row 3: servo angle | I accum */
+        MID_OLED_ShowString(0, 40, "SA:", 12);
+        MID_OLED_ShowNumber(18, 40, (uint32_t)s_servo_angle, 3, 12);
+        {
+            int32_t v = (int32_t)(s_i_accum >= 0 ? s_i_accum + 0.5f : s_i_accum - 0.5f);
+            char tbuf[7];
+            uint8_t p = 0;
+            MID_OLED_ShowString(54, 40, "I:", 12);
+            if (v < 0) { tbuf[p++] = '-'; v = -v; }
+            else       { tbuf[p++] = '+'; }
+            tbuf[p++] = '0' + (v / 10) % 10;
+            tbuf[p++] = '0' + (v % 10);
+            tbuf[p++] = 'd'; tbuf[p] = '\0';
+            MID_OLED_ShowString(72, 40, tbuf, 12);
+        }
+        /* Row 4: arrive count | time */
+        MID_OLED_ShowString(0, 52, "C:", 12);
+        MID_OLED_ShowNumber(12, 52, s_arrive_cnt, 2, 12);
+        MID_OLED_ShowString(24, 52, "/", 12);
+        MID_OLED_ShowNumber(30, 52, ARRIVE_COUNT, 2, 12);
         fmt_time(buf, s_total_ticks);
-        MID_OLED_ShowString(0, 48, buf, 12);
+        MID_OLED_ShowString(60, 52, buf, 12);
         break;
 
-    case STATE_SETTLE:
-        MID_OLED_ShowString(22, 0, "Q3 SETTLE", 16);
-        MID_OLED_ShowString(0, 34, "Servo:", 12);
-        MID_OLED_ShowNumber(48, 34, SETTLE_ANGLE, 3, 12);
-        MID_OLED_ShowString(72, 34, "deg", 12);
-        fmt_time(buf, s_total_ticks);
-        MID_OLED_ShowString(0, 48, buf, 12);
-        break;
-
-    case STATE_DONE:
+    case STATE_DONE: {
         MID_OLED_ShowString(28, 0, "Q3  DONE!", 16);
-        MID_OLED_ShowString(0, 22, "O -> +5 -> -5 cm", 12);
+        if (MID_K230_IsDetected()) {
+            char dbuf[8];
+            int32_t ferr = (int32_t)(s_k230_error >= 0 ? s_k230_error + 0.5f : s_k230_error - 0.5f);
+            uint8_t p = 0;
+            MID_OLED_ShowString(0, 22, "Final err:", 12);
+            if (ferr < 0) { dbuf[p++] = '-'; ferr = -ferr; }
+            else          { dbuf[p++] = '+'; }
+            dbuf[p++] = '0' + (ferr / 10) % 10;
+            dbuf[p++] = '0' + (ferr % 10);
+            dbuf[p++] = 'm'; dbuf[p++] = 'm'; dbuf[p] = '\0';
+            MID_OLED_ShowString(66, 22, dbuf, 12);
+        } else {
+            MID_OLED_ShowString(0, 22, "O -> +5 -> -5 cm", 12);
+        }
+        MID_OLED_ShowString(0, 38, "SA:", 12);
+        MID_OLED_ShowNumber(18, 38, (uint32_t)s_servo_angle, 3, 12);
         fmt_time(buf, s_total_ticks);
-        MID_OLED_ShowString(0, 38, "Time:", 12);
-        MID_OLED_ShowString(48, 38, buf, 12);
+        MID_OLED_ShowString(0, 52, "Time:", 12);
+        MID_OLED_ShowString(48, 52, buf, 12);
         break;
+    }
     }
 
     MID_OLED_RefreshGram();
@@ -271,11 +520,12 @@ void APP_BallCtrl1_Start(void)
 {
     if (s_state != STATE_IDLE && s_state != STATE_DONE) return;
 
-    s_state       = STATE_ACCEL;
+    s_state       = STATE_TO_P5;
     s_tick        = 0;
     s_total_ticks = 0;
     s_disp_tick   = 0;
-    set_servo(-ACCEL_ANGLE);
+    s_target_mm   = (float)TARGET_P5_MM;
+    vision_reset();  /* fresh PID + frame history */
 }
 
 void APP_BallCtrl1_Stop(void)

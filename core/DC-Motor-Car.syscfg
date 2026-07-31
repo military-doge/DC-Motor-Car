@@ -43,7 +43,6 @@ divider9.divideValue = 2;
 
 const gate7  = system.clockTree["MFCLKGATE"];
 gate7.enable = true;
-
 const multiplier2         = system.clockTree["PLL_QDIV"];
 multiplier2.multiplyValue = 5;
 
@@ -186,6 +185,7 @@ UART1.enableDMARX                      = false;
 UART1.enableDMATX                      = false;
 UART1.enabledInterrupts                = ["RX"];
 UART1.interruptPriority                = "1";
+UART1.targetBaudRate                   = 115200;
 UART1.peripheral.$assign               = "UART1";
 UART1.peripheral.rxPin.$assign         = "PB7";
 UART1.peripheral.txPin.$assign         = "PB6";

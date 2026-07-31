@@ -42,8 +42,9 @@
 #include "bsp_dma_rx.h"
 #include "bsp_servo.h"
 #include "mid_oled.h"
-#include "mid_ble.h"
+
 #include "mid_line_track.h"
+#include "mid_k230.h"
 #include "app_control.h"
 // #include "app_line_track_low_speed_circle.h"
 // #include "app_line_track_high_speed.h"
@@ -87,8 +88,9 @@ int main(void)
 
     /* [3] Middleware layer init */
     MID_OLED_Init();
-    MID_BLE_Init();
+
     MID_LineTrack_Init();
+    MID_K230_Init();
 
     /* [4] App layer init */
     APP_Control_Init();
@@ -109,7 +111,8 @@ int main(void)
 
     /* [7] Main loop */
     while (1) {
-        MID_BLE_Poll();
+
+        MID_K230_Poll();
         APP_BallCtrl1_Run();
     }
 }

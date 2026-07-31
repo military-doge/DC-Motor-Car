@@ -1,156 +1,114 @@
 #include "app_test.h"
 #include "bsp_servo.h"
+#include "mid_k230.h"
 #include "mid_oled.h"
-#include "bsp_led.h"
+#include "bsp_delay.h"
 
 /*
- * Servo → rack calibration test.
+ * K230 real-time data monitor.
  *
- * Each key press advances one step through a symmetric angle sequence:
- *   +2° → +8° → +15° → -15° → -8° → -2°  (repeat)
+ * Continuously reads MID_K230 parsed frames and displays:
+ *   - Ball position (cm, 0.1 cm precision)
+ *   - Detection status (D flag)
+ *   - Data age (ms since last valid frame)
  *
- * Angles are relative (delta from current position), cumulative.
- * Sequence total = 0°, so it always returns to centre after a full cycle.
- *
- * OLED shows:
- *   Step N     direction
- *   Servo: XXX deg
- *   Rack h: ±X.XXX mm  (theoretical)
- *
- * User measures actual rack height with caliper at each step
- * and compares against the theoretical value.
+ * Key press toggles display on/off (same as other app modules).
  */
-
-/* ========== test sequence ========== */
-
-static const int16_t s_seq_deltas[] = {2, 8, 15, -15, -8, -2};
-#define SEQ_LEN  (sizeof(s_seq_deltas) / sizeof(s_seq_deltas[0]))
-
-/* ========== physical constants ========== */
-
-#define GEAR_RADIUS_MM   15.625f   /* pinion pitch-circle radius */
-#define SERVO_CENTER     135
-
-/* rack height from centre: h = (135 - θ) × r × π/180 */
-static float calc_rack_h_mm(int16_t angle_deg)
-{
-    return (float)(SERVO_CENTER - angle_deg) * GEAR_RADIUS_MM * 3.14159265f / 180.0f;
-}
 
 /* ========== static state ========== */
 
-static uint8_t  s_seq_index  = 0;
-static int16_t  s_angle      = SERVO_CENTER;   /* absolute servo angle */
-static bool     s_dirty      = true;           /* OLED needs refresh */
-static bool     s_running    = false;          /* test active */
+static bool s_running = false;
 
 /* ========== public API ========== */
 
 void APP_Test_Init(void)
 {
-    s_seq_index = 0;
-    s_angle     = SERVO_CENTER;
-    s_dirty     = true;
-    s_running   = true;
-    BSP_Servo_SetAngle(SERVO_CENTER);
+    s_running = true;
 
-    /* Show initial screen */
+    /* Center servo to 135° (horizontal) */
+    BSP_Servo_Init();
+    BSP_Servo_SetAngle(135);
+
     MID_OLED_Clear();
-    MID_OLED_ShowString(30, 0, "SERVO CAL", 12);
-    MID_OLED_ShowString(24, 20, "Key=Step", 12);
-    MID_OLED_ShowString(12, 36, "Measure rack", 12);
-    MID_OLED_ShowString(12, 48, "with caliper", 12);
+    MID_OLED_ShowString(24, 0, "K230 TEST", 12);
+    MID_OLED_ShowString(6, 24, "Servo centered", 12);
+    MID_OLED_ShowString(6, 40, "K230 data...", 12);
     MID_OLED_RefreshGram();
 }
 
 void APP_Test_TimerTick(void)
 {
-    /* nothing to do — all work in Start() triggered by key */
+    /* nothing — K230 polling is in main loop, display in Run() */
 }
 
 void APP_Test_Run(void)
 {
-    char buf[16];
+    char buf[14];
 
-    if (!s_dirty) return;
-    s_dirty = false;
+    if (!s_running) return;
+
+    bool     detected = MID_K230_IsDetected();
+    float    pos      = MID_K230_GetPosition();
+    uint32_t last_up  = MID_K230_GetLastUpdate();
 
     MID_OLED_Clear();
 
-    /* Line 0: step info */
-    {
-        int16_t delta = s_seq_deltas[s_seq_index > 0 ? s_seq_index - 1 : SEQ_LEN - 1];
-        if (delta > 0) {
-            MID_OLED_ShowString(0, 0, "Step", 12);
-            MID_OLED_ShowNumber(36, 0, s_seq_index, 1, 12);
-            MID_OLED_ShowString(48, 0, "+", 12);
-            MID_OLED_ShowNumber(54, 0, delta, 2, 12);
-            MID_OLED_ShowString(78, 0, "deg", 12);
-        } else {
-            MID_OLED_ShowString(0, 0, "Step", 12);
-            MID_OLED_ShowNumber(36, 0, s_seq_index, 1, 12);
-            MID_OLED_ShowString(48, 0, "-", 12);
-            MID_OLED_ShowNumber(54, 0, -delta, 2, 12);
-            MID_OLED_ShowString(78, 0, "deg", 12);
-        }
+    /* ---- Row 0: title ---- */
+    MID_OLED_ShowString(24, 0, "K230  MONITOR", 12);
+
+    /* ---- Row 1 (y=16): ball position ---- */
+    if (detected) {
+        /*
+         * pos is in mm (K230 sends mm via cx_to_mm).
+         * e.g. +35.0 → 35 mm, -120.0 → -120 mm
+         */
+        int32_t val = (int32_t)(pos >= 0 ? pos + 0.5f : pos - 0.5f);
+        uint8_t p   = 0;
+
+        MID_OLED_ShowString(0, 16, "X:", 12);
+
+        if (val < 0) { buf[p++] = '-'; val = -val; }
+        else         { buf[p++] = '+'; }
+
+        buf[p++] = '0' + (val / 100) % 10;   /* hundreds mm */
+        buf[p++] = '0' + (val / 10) % 10;    /* tens mm */
+        buf[p++] = '0' + (val % 10);          /* ones mm */
+        buf[p++] = 'm';
+        buf[p++] = 'm';
+        buf[p]   = '\0';
+
+        MID_OLED_ShowString(18, 16, buf, 12);
+    } else {
+        MID_OLED_ShowString(0, 16, "X:  -- mm", 12);
     }
 
-    /* Line 16: absolute servo angle */
-    MID_OLED_ShowString(0, 16, "Servo:", 12);
-    MID_OLED_ShowNumber(48, 16, (uint16_t)s_angle, 3, 12);
-    MID_OLED_ShowString(78, 16, "deg", 12);
+    /* ---- Row 2 (y=32): detection status ---- */
+    MID_OLED_ShowString(0, 32, "D:", 12);
+    MID_OLED_ShowNumber(18, 32, detected ? 1 : 0, 1, 12);
+    MID_OLED_ShowString(30, 32, detected ? "BALL OK" : "NO BALL", 12);
 
-    /* Line 32: theoretical rack height */
-    {
-        float h = calc_rack_h_mm(s_angle);
-        int32_t h_int = (int32_t)(h * 1000.0f);  /* μm */
-        uint8_t pos = 0;
-        MID_OLED_ShowString(0, 32, "h_th:", 12);
-        if (h_int < 0) {
-            buf[pos++] = '-';
-            h_int = -h_int;
-        } else {
-            buf[pos++] = '+';
-        }
-        buf[pos++] = '0' + (h_int / 1000) % 10;
-        buf[pos++] = '.';
-        buf[pos++] = '0' + (h_int / 100) % 10;
-        buf[pos++] = '0' + (h_int / 10) % 10;
-        buf[pos++] = '0' + h_int % 10;
-        buf[pos]   = '\0';
-        buf[6]    = '\0';  /* truncate to "±X.XXX" */
-        MID_OLED_ShowString(42, 32, buf, 12);
-        MID_OLED_ShowString(90, 32, "mm", 12);
+    /* ---- Row 3 (y=48): data age ---- */
+    MID_OLED_ShowString(0, 48, "Age:", 12);
+    if (last_up > 0) {
+        uint32_t age = BSP_Delay_GetTick() - last_up;
+        if (age > 9999) age = 9999;             /* clamp to 4-digit display */
+        MID_OLED_ShowNumber(36, 48, age, 4, 12);
+        MID_OLED_ShowString(66, 48, "ms", 12);
+    } else {
+        MID_OLED_ShowString(36, 48, "NO DATA", 12);
     }
-
-    /* Line 48: hint */
-    MID_OLED_ShowString(0, 52, "Key=Next", 12);
 
     MID_OLED_RefreshGram();
 }
 
 void APP_Test_Start(void)
 {
-    /* Advance to next step in sequence */
-    int16_t delta = s_seq_deltas[s_seq_index];
-    s_angle += delta;
-
-    /* Clamp to servo range */
-    if (s_angle < 0)   s_angle = 0;
-    if (s_angle > 270) s_angle = 270;
-
-    BSP_Servo_SetAngle((uint16_t)s_angle);
-    s_seq_index = (s_seq_index + 1) % SEQ_LEN;
-    s_dirty = true;
+    s_running = true;
 }
 
 void APP_Test_Stop(void)
 {
-    s_running   = false;
-    s_angle     = SERVO_CENTER;
-    s_seq_index = 0;
-    s_dirty     = true;
-    BSP_Servo_SetAngle(SERVO_CENTER);
+    s_running = false;
 }
 
 bool APP_Test_IsRunning(void)
