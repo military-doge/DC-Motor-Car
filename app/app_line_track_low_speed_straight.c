@@ -38,10 +38,12 @@
 #include "bsp_key.h"
 #include "bsp_led.h"
 #include "bsp_servo.h"
+#include "bsp_delay.h"
 #include "mid_oled.h"
 #include "mid_line_track.h"
+#include "mid_k230.h"
 
-/* ---- Constants ---- */
+/* ---- Basic constants ---- */
 #define APP_LTS_FREQ             100.0f
 #define APP_LTS_PERIMETER        0.2042f
 #define APP_LTS_PULSES_PER_REV   25525
@@ -49,33 +51,63 @@
 #define APP_LTS_DEADBAND         0.005f
 #define APP_LTS_PWM_MAX          7800
 
-/* ---- Acceleration profile (triangular: accel + decel, no cruise) ----
- * Phase 1: 0 → 0.80m uniform acceleration from rest to v_max
- * Phase 2: 0.80m → 2.0m uniform deceleration to ~0
- * Constraint: avg speed over first 1.5m = 0.2 m/s
- *   t_1.5 = (2×0.8 + 2.4×(1-√(1-1.4/2.4))) / v_max = 2.4508/v_max
- *   v_avg = 1.5 / t_1.5 = 1.5×v_max/2.4508 = 0.2  →  v_max ≈ 0.327 m/s
- *   a_accel = v_max²/(2×0.8) ≈ 0.0667 m/s²
- *   a_decel = v_max²/(2×1.2) ≈ 0.0445 m/s²
+/* ---- Q4 Speed profile (triangular: accel + decel, no cruise) ----
+ * Phase 1: 0 -> 0.80m uniform acceleration from rest to v_max
+ * Phase 2: 0.80m -> 2.0m uniform deceleration to ~0
+ * Constraint: avg speed over first 1.5m = 0.22 m/s
+ *   v_avg = 1.5*v_max/2.4508 = 0.22  ->  v_max = 0.359 m/s
+ *   a_accel = v_max^2/(2*0.8) = 0.081 m/s^2
+ *   a_decel = v_max^2/(2*1.2) = 0.054 m/s^2
  */
 #define APP_LTS_ACCEL_DIST_M     0.80f
 #define APP_LTS_DECEL_DIST_M     1.20f
-#define APP_LTS_ACCEL_MPS2       0.0667f
-#define APP_LTS_DECEL_MPS2       0.0445f
-#define APP_LTS_VMAX_MPS         0.327f
-
-/* Minimum speed floor to overcome static friction at dead start.
- * Without this, v=0 at d=0 → PI bias=0 → no PWM → car stays stuck. */
+#define APP_LTS_ACCEL_MPS2       0.081f
+#define APP_LTS_DECEL_MPS2       0.054f
+#define APP_LTS_VMAX_MPS         0.359f
 #define APP_LTS_VMIN_MPS         0.08f
 
 /* Distance: 2m auto-stop */
-#define APP_LTS_DIST_PER_PULSE   (APP_LTS_PERIMETER / APP_LTS_PULSES_PER_REV / 2.0f)
 #define APP_LTS_TARGET_DIST_M    2.0f
+#define APP_LTS_DECEL_START_M    (APP_LTS_TARGET_DIST_M - APP_LTS_DECEL_DIST_M)
+
+#define APP_LTS_DIST_PER_PULSE   (APP_LTS_PERIMETER / APP_LTS_PULSES_PER_REV / 2.0f)
 #define APP_LTS_TARGET_PULSES    ((int32_t)(APP_LTS_TARGET_DIST_M / APP_LTS_DIST_PER_PULSE))
 
 /* ---- Speed PI ---- */
 #define APP_LTS_KP  600.0f
 #define APP_LTS_KI  600.0f
+
+/* ---- Q4 Vision PID (target = 0mm, ball at O) ----
+ * Gains from Q3 stationary balancing, validated 2026-07-31.
+ * KP/KD < 0 per README authority formula.
+ */
+#define SERVO_CENTER_DEG         135
+#define VISION_KP                -2.885f
+#define VISION_KI                -0.096f
+#define VISION_KD                -2.290f
+#define VISION_I_MAX             43.0f
+#define VISION_I_ERR_THR         20.0f
+#define VISION_DATA_TIMEOUT_MS   200
+#define PID_CLAMP_DEG            29.3f
+
+/* ---- Fine-tuning softener ---- */
+#define FINE_ERR_THR_MM          20.0f
+#define FINE_SCALE_MIN           0.35f
+
+/* ---- Feedforward ----
+ * Kinematics: a_ball = 0.0110 * |dtheta| m/s^2
+ * To cancel car acceleration: dtheta = a_car / 0.0110
+ * Kff = 1/0.0110 = 90.9 deg/(m/s^2)
+ * Sign: a_car > 0 -> ball lags backward -> need CCW tilt (neg offset)
+ *       ff = -Kff * a_car
+ */
+#define KFF_ACCEL                90.9f
+#define FF_CLAMP_DEG             35.0f
+
+/* ---- Stuck detection ---- */
+#define STUCK_VEL_THR_MM_S       5.0f
+#define STUCK_POS_THR_MM         20.0f
+#define STUCK_BOOST_DEG          7.68f
 
 /* ---- Motor speed state ---- */
 typedef struct {
@@ -89,8 +121,9 @@ static volatile app_lts_motor_t s_motor_left;
 static volatile app_lts_motor_t s_motor_right;
 static volatile bool s_running      = false;
 static volatile bool s_done         = false;
-static volatile uint32_t s_tick     = 0;
+static volatile uint32_t s_tick      = 0;
 static volatile uint32_t s_start_tick = 0;
+static volatile uint32_t s_stop_tick  = 0;
 static volatile uint16_t s_sensor_data[8];
 
 /* Distance */
@@ -101,8 +134,22 @@ static volatile float   s_distance_m   = 0.0f;
 static float s_last_bias_left;
 static float s_last_bias_right;
 
-/* Servo tilt state */
-static float s_servo_angle = 135.0f;
+/* ---- Vision PID state ---- */
+static float    s_prev_k230_pos;        /* previous K230 position mm */
+static uint32_t s_prev_k230_ts;         /* previous K230 timestamp ms */
+static float    s_i_accum       = 0.0f; /* integral accumulator deg */
+static float    s_ball_velocity = 0.0f; /* ball velocity mm/s */
+static float    s_vision_trim   = 0.0f; /* latest vision trim deg */
+static float    s_k230_pos      = 0.0f; /* latest K230 position mm */
+static float    s_k230_error    = 0.0f; /* latest error mm */
+static bool     s_k230_has_prev = false;
+
+/* Car acceleration for feedforward */
+static float    s_prev_car_speed = 0.0f;
+static float    s_car_accel      = 0.0f;
+
+/* Servo angle (smoothed) */
+static float    s_servo_angle_f = 135.0f;
 
 /* ---- Helpers ---- */
 
@@ -159,7 +206,6 @@ static void app_lts_fmt_speed(char *buf, float speed_mps)
     buf[pos]   = '\0';
 }
 
-/* Format distance as "X.XX" meters */
 static void app_lts_fmt_dist(char *buf, float dist_m)
 {
     int32_t cm = (int32_t)(dist_m * 100.0f);
@@ -171,7 +217,7 @@ static void app_lts_fmt_dist(char *buf, float dist_m)
     buf[pos]   = '\0';
 }
 
-/* ---- Speed profile: acceleration → deceleration (triangular) ---- */
+/* ---- Speed profile: acceleration -> deceleration (triangular) ---- */
 static float app_lts_calc_target_speed(float dist_m)
 {
     float v;
@@ -188,7 +234,7 @@ static float app_lts_calc_target_speed(float dist_m)
         }
         return (v < APP_LTS_VMAX_MPS) ? v : APP_LTS_VMAX_MPS;
     }
-    /* Phase 2: uniform deceleration, v = sqrt(v_max² - 2 * a_decel * (d - d_accel)) */
+    /* Phase 2: uniform deceleration, v = sqrt(v_max^2 - 2 * a_decel * (d - d_accel)) */
     {
         float d_into_decel = dist_m - d_decel_start;
         float v_sq = APP_LTS_VMAX_MPS * APP_LTS_VMAX_MPS
@@ -201,88 +247,138 @@ static float app_lts_calc_target_speed(float dist_m)
     }
 }
 
-/* ---- Servo tilt compensation ----
- *
- * Physics (measured kinematics, 2026-07-30):
- *   a_ball = 0.0110 × |Δθ_servo|  [m/s²]  (magnitude, from φ=0.064×Δθ and a=g×φ)
- *   Car accel:  a_accel = 0.0667 m/s²  →  Δθ = 6.1° to cancel exactly
- *   Car decel:  a_decel = 0.0445 m/s²  →  Δθ = 4.1° to cancel exactly
- * Add ~2° margin for pipe friction → steady-state: 8° accel, 6° decel.
- *
- * Direction (实测):
- *   Accel → ball lags backward → need ball→+cm → CCW 逆转 (angle decrease)
- *   Decel → ball lunges forward → need ball→-cm → CW 正转 (angle increase)
+/* ---- Vision PID + Feedforward servo control ---- */
+
+/*
+ * Compute vision PID trim + acceleration feedforward.
+ * Ported from app_ball_ctrl_1.c with added feedforward path.
+ * Returns total trim deg clamped to +/-clamp_deg, or feedforward-only if
+ * K230 data unavailable.
  */
-#define SERVO_ACCEL_KICK_DEG    18.0f   /* initial kick CCW (break static friction) */
-#define SERVO_ACCEL_KICK_TICKS  15      /* kick duration: 150ms */
-#define SERVO_ACCEL_SETTLE_TICKS 5      /* settle from kick→hold: 50ms */
-#define SERVO_ACCEL_HOLD_DEG    12.0f   /* steady compensation CCW */
-#define SERVO_DECEL_HOLD_DEG    6.0f    /* steady compensation CW */
-#define SERVO_DECEL_RAMP_M      0.10f   /* ramp-in distance at start of decel */
-#define SERVO_TAPER_M           0.10f   /* taper-out distance before phase end */
-
-static void app_lts_update_servo(float dist_m)
+static float compute_servo_trim(float clamp_deg)
 {
-    float desired = 135.0f;
+    float pos, error_mm, dt, vel, abs_err;
+    float p_term, d_term, trim;
+    float ff_trim;
+    uint32_t age, k230_ts;
+    int32_t diff;
 
-    if (!s_running) {
-        s_servo_angle = 135.0f;
+    /* ---- Acceleration feedforward (always active) ---- */
+    ff_trim = -KFF_ACCEL * s_car_accel;
+    if (ff_trim > +FF_CLAMP_DEG) ff_trim = +FF_CLAMP_DEG;
+    if (ff_trim < -FF_CLAMP_DEG) ff_trim = -FF_CLAMP_DEG;
+
+    /* ---- Check K230 data freshness ---- */
+    age = BSP_Delay_GetTick() - MID_K230_GetLastUpdate();
+    if (!(MID_K230_IsDetected() && (MID_K230_GetLastUpdate() > 0)
+            && (age < VISION_DATA_TIMEOUT_MS))) {
+        /* K230 unavailable: feedforward only, no PID */
+        s_vision_trim = 0.0f;
+        return ff_trim;
+    }
+
+    pos      = MID_K230_GetPosition();
+    k230_ts  = MID_K230_GetTimestamp();
+    error_mm = 0.0f - pos;  /* target = 0 (ball at O) */
+
+    /* ---- dt from K230 timestamps, velocity (mm/s) ---- */
+    diff = (int32_t)(k230_ts - s_prev_k230_ts);
+    if (s_k230_has_prev && diff > 0 && diff < 500) {
+        dt = (float)diff / 1000.0f;
+        vel = (pos - s_prev_k230_pos) / dt;
+        s_ball_velocity = vel;
+        s_prev_k230_pos = pos;
+        s_prev_k230_ts  = k230_ts;
+    } else if (s_k230_has_prev) {
+        vel = s_ball_velocity;
+    } else {
+        vel = 0.0f;
+        s_ball_velocity = 0.0f;
+        s_prev_k230_pos = pos;
+        s_prev_k230_ts  = k230_ts;
+        s_k230_has_prev = true;
+    }
+
+    s_k230_pos   = pos;
+    s_k230_error = error_mm;
+
+    /* ---- P term ---- */
+    p_term = VISION_KP * error_mm;
+
+    /* ---- I term (conditional accumulation + anti-windup) ---- */
+    abs_err = error_mm < 0 ? -error_mm : error_mm;
+    if (abs_err < VISION_I_ERR_THR) {
+        s_i_accum += VISION_KI * error_mm * dt;
+        if (s_i_accum > +VISION_I_MAX) s_i_accum = +VISION_I_MAX;
+        if (s_i_accum < -VISION_I_MAX) s_i_accum = -VISION_I_MAX;
+    }
+
+    /* ---- D term (derivative-on-measurement) ---- */
+    d_term = VISION_KD * (-vel);
+
+    /* ---- Sum PID ---- */
+    trim = p_term + s_i_accum + d_term;
+
+    /* ---- Stuck detection ---- */
+    {
+        float abs_vel = vel < 0 ? -vel : vel;
+        if (abs_vel < STUCK_VEL_THR_MM_S && abs_err > STUCK_POS_THR_MM
+                && s_k230_has_prev) {
+            trim += (error_mm > 0) ? -STUCK_BOOST_DEG : +STUCK_BOOST_DEG;
+        }
+    }
+
+    /* ---- PID clamp ---- */
+    if (trim > +clamp_deg) trim = +clamp_deg;
+    if (trim < -clamp_deg) trim = -clamp_deg;
+
+    /* ---- Fine-tuning softener ---- */
+    {
+        float abs_err_fine = error_mm < 0 ? -error_mm : error_mm;
+        float scale;
+        if (abs_err_fine >= FINE_ERR_THR_MM) {
+            scale = 1.0f;
+        } else {
+            scale = FINE_SCALE_MIN
+                  + (1.0f - FINE_SCALE_MIN) * (abs_err_fine / FINE_ERR_THR_MM);
+        }
+        trim *= scale;
+    }
+
+    s_vision_trim = trim;
+
+    /* ---- PID + Feedforward ---- */
+    trim += ff_trim;
+    if (trim > +clamp_deg) trim = +clamp_deg;
+    if (trim < -clamp_deg) trim = -clamp_deg;
+
+    return trim;
+}
+
+static void app_lts_update_servo(void)
+{
+    float desired;
+
+    /* Keep servo active during running AND post-run 5s window */
+    if (!s_running && !s_done) {
+        s_servo_angle_f = 135.0f;
+        s_i_accum       = 0.0f;
         BSP_Servo_SetAngle(135);
         return;
     }
 
-    if (dist_m < APP_LTS_ACCEL_DIST_M) {
-        /* === Acceleration phase: CCW 逆转 → ball → +cm === */
-        uint32_t elapsed = s_tick - s_start_tick;
-        float remaining = APP_LTS_ACCEL_DIST_M - dist_m;
+    desired = 135.0f + compute_servo_trim(PID_CLAMP_DEG);
 
-        if (elapsed < SERVO_ACCEL_KICK_TICKS) {
-            /* Fast kick to break static friction: 0 → 18° CCW */
-            float frac = (float)elapsed / (float)SERVO_ACCEL_KICK_TICKS;
-            desired = 135.0f - SERVO_ACCEL_KICK_DEG * frac;
-        } else if (elapsed < SERVO_ACCEL_KICK_TICKS + SERVO_ACCEL_SETTLE_TICKS) {
-            /* Quick settle: kick → hold over SETTLE_TICKS */
-            float frac = (float)(elapsed - SERVO_ACCEL_KICK_TICKS)
-                         / (float)SERVO_ACCEL_SETTLE_TICKS;
-            desired = 135.0f - (SERVO_ACCEL_KICK_DEG
-                       - (SERVO_ACCEL_KICK_DEG - SERVO_ACCEL_HOLD_DEG) * frac);
-        } else if (remaining < SERVO_TAPER_M) {
-            /* Taper to 0° near end of accel (last 10cm) */
-            float frac = remaining / SERVO_TAPER_M;  /* 1 → 0 */
-            desired = 135.0f - SERVO_ACCEL_HOLD_DEG * frac;
-        } else {
-            /* Steady compensation: hold ACCEL_HOLD CCW */
-            desired = 135.0f - SERVO_ACCEL_HOLD_DEG;
-        }
-    } else if (dist_m < APP_LTS_TARGET_DIST_M) {
-        /* === Deceleration phase: CW 正转 → ball → -cm === */
-        float d_into = dist_m - APP_LTS_ACCEL_DIST_M;
-        float remaining = APP_LTS_TARGET_DIST_M - dist_m;
-
-        if (d_into < SERVO_DECEL_RAMP_M) {
-            /* Smooth ramp into CW tilt over first 10cm */
-            float frac = d_into / SERVO_DECEL_RAMP_M;
-            desired = 135.0f + SERVO_DECEL_HOLD_DEG * frac;
-        } else if (remaining < SERVO_TAPER_M) {
-            /* Taper to 0° near end of decel (last 10cm) */
-            float frac = remaining / SERVO_TAPER_M;
-            desired = 135.0f + SERVO_DECEL_HOLD_DEG * frac;
-        } else {
-            /* Steady compensation: hold 6° CW */
-            desired = 135.0f + SERVO_DECEL_HOLD_DEG;
-        }
-    }
-
-    /* Slew rate limit: 3°/tick for smooth motion */
+    /* Slew rate limit: 5 deg/tick for smooth motion */
     {
-        float diff = desired - s_servo_angle;
-        float max_step = 3.0f;
+        float diff = desired - s_servo_angle_f;
+        float max_step = 5.0f;
         if (diff > max_step) diff = max_step;
         if (diff < -max_step) diff = -max_step;
-        s_servo_angle += diff;
+        s_servo_angle_f += diff;
     }
 
-    BSP_Servo_SetAngle((uint16_t)(s_servo_angle + 0.5f));
+    BSP_Servo_SetAngle((uint16_t)(s_servo_angle_f + 0.5f));
 }
 
 /* ---- Public API ---- */
@@ -301,17 +397,28 @@ void APP_LineTrack_LowSpeedStraight_Init(void)
     s_last_bias_left  = 0.0f;
     s_last_bias_right = 0.0f;
 
-    /* Set initial base speed (starts from 0, ramps up per acceleration profile) */
-    MID_LineTrack_SetBaseSpeed(0.0f);
+    /* Vision state */
+    s_i_accum        = 0.0f;
+    s_ball_velocity  = 0.0f;
+    s_vision_trim    = 0.0f;
+    s_k230_pos       = 0.0f;
+    s_k230_error     = 0.0f;
+    s_k230_has_prev  = false;
+    s_prev_k230_pos  = 0.0f;
+    s_prev_k230_ts   = 0;
+    s_prev_car_speed = 0.0f;
+    s_car_accel      = 0.0f;
 
-    /* Servo to center */
-    s_servo_angle = 135.0f;
+    MID_LineTrack_SetBaseSpeed(0.0f);
+    s_servo_angle_f = 135.0f;
     BSP_Servo_SetAngle(135);
 }
 
 /*
  * Called from 10ms timer ISR callback.
- * Reads sensors -> MID_LineTrack PD -> reads encoders -> speed calc -> PI -> PWM.
+ * grayscale -> encoder -> speed -> PI -> PWM
+ * -> vision PID + feedforward -> servo.
+ * K230 is polled in main loop (main.c).
  */
 void APP_LineTrack_LowSpeedStraight_TimerTick(void)
 {
@@ -332,8 +439,6 @@ void APP_LineTrack_LowSpeedStraight_TimerTick(void)
 
     /* 3. Read grayscale sensors */
     BSP_Grayscale_ReadAll(raw_sensor);
-
-    /* Store for display */
     for (i = 0; i < 8; i++) {
         s_sensor_data[i] = raw_sensor[i];
     }
@@ -356,57 +461,66 @@ void APP_LineTrack_LowSpeedStraight_TimerTick(void)
                     + (count_b > 0 ? count_b : -count_b);
     s_distance_m = (float)s_total_pulses * APP_LTS_DIST_PER_PULSE;
 
-    /* 7.5 Auto-stop at 2m */
-    if (s_total_pulses >= APP_LTS_TARGET_PULSES) {
+    /* 7.5 Auto-stop at A->B distance */
+    if (s_total_pulses >= APP_LTS_TARGET_PULSES && s_running) {
         s_running = false;
         s_done    = true;
+        s_stop_tick = s_tick;
         s_motor_left.target_speed  = 0.0f;
         s_motor_right.target_speed = 0.0f;
-        s_servo_angle = 135.0f;
+        BSP_Motor_Stop();
+        /* Servo stays alive for 5s post-run — fall through */
+    }
+
+    /* 8. Manual stop check (key press, not auto-stop) */
+    if (!s_running && !s_done) {
+        s_servo_angle_f = 135.0f;
         BSP_Servo_SetAngle(135);
         BSP_Motor_Stop();
         return;
     }
 
-    /* 8. Stop check */
-    if (!s_running) {
-        s_servo_angle = 135.0f;
+    /* 8.5 Post-run servo timeout: 5s after auto-stop, servo returns to center */
+    if (s_done && (s_tick - s_stop_tick >= 500)) {
+        s_servo_angle_f = 135.0f;
         BSP_Servo_SetAngle(135);
-        BSP_Motor_Stop();
         return;
     }
 
-    /* 7.8 Update base speed from acceleration profile */
-    MID_LineTrack_SetBaseSpeed(app_lts_calc_target_speed(s_distance_m));
+    /* 7.8 Update base speed + line tracking (only while running) */
+    if (s_running) {
+        MID_LineTrack_SetBaseSpeed(app_lts_calc_target_speed(s_distance_m));
+        MID_LineTrack_Update(raw_sensor, &left_tgt, &right_tgt);
+        s_motor_left.target_speed  = left_tgt;
+        s_motor_right.target_speed = right_tgt;
 
-    /* 8. Compute line-tracking targets from middleware */
-    MID_LineTrack_Update(raw_sensor, &left_tgt, &right_tgt);
+        /* 9. PI control and PWM output */
+        pwm_a = app_lts_pi_update(s_motor_left.current_speed,
+            s_motor_left.target_speed, &s_last_bias_left,
+            &s_motor_left.pwm_output);
+        pwm_b = app_lts_pi_update(s_motor_right.current_speed,
+            s_motor_right.target_speed, &s_last_bias_right,
+            &s_motor_right.pwm_output);
+        BSP_Motor_SetPWM(pwm_a, pwm_b);
+    }
 
-    s_motor_left.target_speed  = left_tgt;
-    s_motor_right.target_speed = right_tgt;
+    /* 9.3 Car acceleration estimation (low-pass filtered) */
+    {
+        float car_speed = (s_motor_left.current_speed
+                         + s_motor_right.current_speed) * 0.5f;
+        float raw_accel = (car_speed - s_prev_car_speed) * APP_LTS_FREQ;
+        s_car_accel = 0.3f * raw_accel + 0.7f * s_car_accel;
+        s_prev_car_speed = car_speed;
+    }
 
-    /* 9. PI control and PWM output */
-    pwm_a = app_lts_pi_update(s_motor_left.current_speed,
-        s_motor_left.target_speed, &s_last_bias_left,
-        &s_motor_left.pwm_output);
-    pwm_b = app_lts_pi_update(s_motor_right.current_speed,
-        s_motor_right.target_speed, &s_last_bias_right,
-        &s_motor_right.pwm_output);
-    BSP_Motor_SetPWM(pwm_a, pwm_b);
-
-    /* 9.5 Servo tilt compensation */
-    app_lts_update_servo(s_distance_m);
+    /* 9.5 Servo: vision PID + feedforward (active until 5s post-run) */
+    app_lts_update_servo();
 
     s_tick++;
 }
 
 /*
  * Called from main loop. Updates OLED display every 500ms.
- * Layout (12px font, 128x64):
- *   LOW SPD STRAIGHT
- *   L:+020|+020
- *   R:+020|+020
- *   RUN
  */
 void APP_LineTrack_LowSpeedStraight_Run(void)
 {
@@ -419,8 +533,18 @@ void APP_LineTrack_LowSpeedStraight_Run(void)
     MID_OLED_Clear();
 
     if (s_done) {
-        /* Finished: 2m reached */
-        MID_OLED_ShowString(18, 0, "2M DONE!", 12);
+        /* Finished: A->B reached, servo runs 5s post-stop */
+        {
+            uint32_t post_ticks = s_tick - s_stop_tick;
+            if (post_ticks < 500) {
+                uint16_t remain_s = (uint16_t)(5 - post_ticks / 100);
+                MID_OLED_ShowString(0, 0, "Q4 DONE S:", 12);
+                MID_OLED_ShowNumber(72, 0, remain_s, 1, 12);
+                MID_OLED_ShowString(84, 0, "s", 12);
+            } else {
+                MID_OLED_ShowString(0, 0, "Q4 A->B DONE!", 12);
+            }
+        }
         {
             char dbuf[5];
             app_lts_fmt_dist(dbuf, s_distance_m);
@@ -440,7 +564,6 @@ void APP_LineTrack_LowSpeedStraight_Run(void)
             MID_OLED_ShowString(0, 40, "Avg:", 12);
             MID_OLED_ShowString(36, 40, sbuf, 12);
             MID_OLED_ShowString(66, 40, "cm/s", 12);
-            /* elapsed time */
             sec = (uint16_t)elapsed;
             ds  = (uint16_t)(elapsed * 10.0f) % 10;
             tbuf[0] = '0' + (sec / 10) % 10;
@@ -453,27 +576,52 @@ void APP_LineTrack_LowSpeedStraight_Run(void)
             MID_OLED_ShowString(42, 52, tbuf, 12);
         }
     } else if (!s_running) {
-        MID_OLED_ShowString(12, 0, "LOW SPD STR", 12);
+        MID_OLED_ShowString(0, 0, "Q4 A->B BAL", 12);
         MID_OLED_ShowString(36, 24, "READY", 12);
         MID_OLED_ShowString(12, 40, "Key=Start", 12);
     } else {
-        /* Line 0: title with dynamic target speed */
+        /* Line 0: title + target speed */
         {
             char tbuf[5];
             app_lts_fmt_speed(tbuf, app_lts_calc_target_speed(s_distance_m));
-            MID_OLED_ShowString(6, 0, "LOW SPD ", 12);
-            MID_OLED_ShowString(72, 0, tbuf, 12);
+            MID_OLED_ShowString(0, 0, "Q4 ", 12);
+            MID_OLED_ShowString(24, 0, tbuf, 12);
         }
 
-        /* Line 16: L actual speed */
+        /* Line 16: L/R actual speed */
         app_lts_fmt_speed(buf, s_motor_left.current_speed);
         MID_OLED_ShowString(0, 16, "L:", 12);
         MID_OLED_ShowString(12, 16, buf, 12);
 
-        /* Line 28: R actual speed */
         app_lts_fmt_speed(buf, s_motor_right.current_speed);
-        MID_OLED_ShowString(0, 28, "R:", 12);
-        MID_OLED_ShowString(12, 28, buf, 12);
+        MID_OLED_ShowString(54, 16, "R:", 12);
+        MID_OLED_ShowString(66, 16, buf, 12);
+
+        /* Line 28: K230 ball position + error */
+        {
+            char pbuf[7];
+            uint8_t p = 0;
+            int32_t v;
+            if (MID_K230_IsDetected()) {
+                float pos = MID_K230_GetPosition();
+                v = (int32_t)(pos >= 0 ? pos + 0.5f : pos - 0.5f);
+            } else {
+                v = 0;
+            }
+            MID_OLED_ShowString(0, 28, "B:", 12);
+            pbuf[p++] = (v < 0) ? '-' : '+';
+            if (v < 0) v = -v;
+            pbuf[p++] = '0' + (v / 10) % 10;
+            pbuf[p++] = '0' + (v % 10);
+            pbuf[p++] = 'm'; pbuf[p++] = 'm'; pbuf[p] = '\0';
+            MID_OLED_ShowString(18, 28, pbuf, 12);
+        }
+        /* Servo angle */
+        {
+            int16_t ang = (int16_t)(s_servo_angle_f + 0.5f);
+            MID_OLED_ShowString(72, 28, "SA:", 12);
+            MID_OLED_ShowNumber(90, 28, (uint32_t)ang, 3, 12);
+        }
 
         /* Line 40: distance */
         {
@@ -484,10 +632,10 @@ void APP_LineTrack_LowSpeedStraight_Run(void)
             MID_OLED_ShowString(54, 40, "/2.00m", 12);
         }
 
-        /* Line 52: status + elapsed time */
+        /* Line 52: elapsed time + feedforward */
         {
             float elapsed = (float)(s_tick - s_start_tick) * 0.01f;
-            char tbuf[8];
+            char tbuf[7];
             uint16_t sec = (uint16_t)elapsed;
             uint16_t ds = (uint16_t)(elapsed * 10.0f) % 10;
             tbuf[0] = '0' + (sec / 10) % 10;
@@ -496,8 +644,21 @@ void APP_LineTrack_LowSpeedStraight_Run(void)
             tbuf[3] = '0' + ds;
             tbuf[4] = 's';
             tbuf[5] = '\0';
-            MID_OLED_ShowString(0, 52, "RUN T:", 12);
-            MID_OLED_ShowString(42, 52, tbuf, 12);
+            MID_OLED_ShowString(0, 52, tbuf, 12);
+            /* FF indicator */
+            {
+                int32_t ff = (int32_t)(-KFF_ACCEL * s_car_accel);
+                char ff_buf[5];
+                uint8_t p2 = 0;
+                ff_buf[p2++] = (ff < 0) ? '-' : '+';
+                if (ff < 0) ff = -ff;
+                ff_buf[p2++] = '0' + (ff / 10) % 10;
+                ff_buf[p2++] = '0' + (ff % 10);
+                ff_buf[p2++] = 'd';
+                ff_buf[p2]   = '\0';
+                MID_OLED_ShowString(48, 52, "FF:", 12);
+                MID_OLED_ShowString(72, 52, ff_buf, 12);
+            }
         }
     }
 
@@ -515,7 +676,20 @@ void APP_LineTrack_LowSpeedStraight_Start(void)
     s_distance_m   = 0.0f;
     s_done         = false;
     s_start_tick   = s_tick;
-    s_running      = true;
+
+    /* Reset vision PID state for fresh run */
+    s_i_accum        = 0.0f;
+    s_ball_velocity  = 0.0f;
+    s_vision_trim    = 0.0f;
+    s_k230_pos       = 0.0f;
+    s_k230_error     = 0.0f;
+    s_k230_has_prev  = false;
+    s_prev_k230_pos  = 0.0f;
+    s_prev_k230_ts   = 0;
+    s_prev_car_speed = 0.0f;
+    s_car_accel      = 0.0f;
+
+    s_running = true;
 }
 
 void APP_LineTrack_LowSpeedStraight_Stop(void)
@@ -524,7 +698,8 @@ void APP_LineTrack_LowSpeedStraight_Stop(void)
     s_done    = false;
     s_motor_left.target_speed  = 0.0f;
     s_motor_right.target_speed = 0.0f;
-    s_servo_angle = 135.0f;
+    s_servo_angle_f = 135.0f;
+    s_i_accum       = 0.0f;
     BSP_Servo_SetAngle(135);
     BSP_Motor_Stop();
 }

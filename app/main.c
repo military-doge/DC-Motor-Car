@@ -48,23 +48,25 @@
 #include "app_control.h"
 // #include "app_line_track_low_speed_circle.h"
 // #include "app_line_track_high_speed.h"
-#include "app_ball_ctrl_1.h"
+// #include "app_ball_ctrl_1.h"
+// #include "app_line_track_low_speed_straight.h"
+#include "app_line_track_low_speed_circle.h"
 /* ---- Callback glue (lives in main.c, delegates to app layer) ---- */
 
 static void on_timer_10ms(void)
 {
     BSP_Key_Scan();
-    APP_BallCtrl1_TimerTick();
+    APP_LineTrack_LowSpeedCircle_TimerTick();
     BSP_DMA_RX_Process();
 }
 
 static void on_key_click(void)
 {
     BSP_LED_Toggle();
-    if (APP_BallCtrl1_IsRunning()) {
-        APP_BallCtrl1_Stop();
+    if (APP_LineTrack_LowSpeedCircle_IsRunning()) {
+        APP_LineTrack_LowSpeedCircle_Stop();
     } else {
-        APP_BallCtrl1_Start();
+        APP_LineTrack_LowSpeedCircle_Start();
     }
 }
 
@@ -94,7 +96,7 @@ int main(void)
 
     /* [4] App layer init */
     APP_Control_Init();
-    APP_BallCtrl1_Init();
+    APP_LineTrack_LowSpeedCircle_Init();
 
     /* [5] Register cross-layer callbacks */
     BSP_Timer_RegisterCallback(on_timer_10ms);
@@ -113,6 +115,6 @@ int main(void)
     while (1) {
 
         MID_K230_Poll();
-        APP_BallCtrl1_Run();
+        APP_LineTrack_LowSpeedCircle_Run();
     }
 }
