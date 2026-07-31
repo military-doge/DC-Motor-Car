@@ -7,6 +7,8 @@
 void APP_Control_Init(void);
 void APP_Control_TimerTick(void);
 void APP_Control_Run(void);
+void APP_Control_Start(void);
+void APP_Control_Stop(void);
 void APP_Control_ToggleStartStop(void);
 bool APP_Control_IsRunning(void);
 void APP_Control_StartDirect(float speed_mps);

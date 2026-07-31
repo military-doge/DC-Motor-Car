@@ -7,5 +7,6 @@
 bool BSP_Motor_Init(void);
 void BSP_Motor_SetPWM(int16_t pwm_a, int16_t pwm_b);
 void BSP_Motor_Stop(void);
+void BSP_Motor_Brake(void);    /* Short brake: both IN1/IN2 high → motor resists rotation */
 
 #endif /* BSP_MOTOR_H */

@@ -2,6 +2,7 @@
 #include "ti_msp_dl_config.h"
 
 static bsp_key_callback_t s_click_callback = NULL;
+static bsp_key_callback_t s_double_click_callback = NULL;
 
 bool BSP_Key_Init(void)
 {
@@ -12,6 +13,11 @@ bool BSP_Key_Init(void)
 void BSP_Key_RegisterClickCallback(bsp_key_callback_t cb)
 {
     s_click_callback = cb;
+}
+
+void BSP_Key_RegisterDoubleClickCallback(bsp_key_callback_t cb)
+{
+    s_double_click_callback = cb;
 }
 
 /*
@@ -77,5 +83,8 @@ void BSP_Key_Scan(void)
 
     if (result == 1 && s_click_callback) {
         s_click_callback();
+    }
+    if (result == 2 && s_double_click_callback) {
+        s_double_click_callback();
     }
 }

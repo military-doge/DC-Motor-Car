@@ -64,3 +64,12 @@ void BSP_Motor_Stop(void)
 {
     BSP_Motor_SetPWM(0, 0);
 }
+
+void BSP_Motor_Brake(void)
+{
+    /* Short brake: both IN1/IN2 high shorts motor windings via low-side FETs */
+    DL_GPIO_setPins(AIN_PORT, AIN_AIN1_PIN | AIN_AIN2_PIN);
+    DL_GPIO_setPins(BIN_PORT, BIN_BIN1_PIN | BIN_BIN2_PIN);
+    DL_Timer_setCaptureCompareValue(PWM_0_INST, 0, GPIO_PWM_0_C0_IDX);
+    DL_Timer_setCaptureCompareValue(PWM_0_INST, 0, GPIO_PWM_0_C1_IDX);
+}

@@ -66,7 +66,8 @@
 #define HOLD_TICKS              50     /* hold at -5cm for 0.5s before DONE */
 #define HOLD_VEL_THR_MM_S        3.0f   /* ball must be slower than this to count as stationary */
 #define HOLD_DEADBAND_MM         6.0f   /* |error| < this → freeze servo, no more adjustment */
-#define TOTAL_TIMEOUT_TICKS     500    /* 5s total timeout */
+#define TOTAL_TIMEOUT_TICKS     800    /* 8s total timeout (was 5s) */
+#define DONE_HOLD_TICKS          500    /* 5s post-DONE servo hold before centering */
 
 /* ========== internal types ========== */
 
@@ -318,7 +319,22 @@ void APP_BallCtrl1_Init(void)
 
 void APP_BallCtrl1_TimerTick(void)
 {
-    if (s_state == STATE_IDLE || s_state == STATE_DONE) {
+    if (s_state == STATE_IDLE) {
+        return;
+    }
+
+    /* STATE_DONE: keep servo active for 5s post-completion */
+    if (s_state == STATE_DONE) {
+        s_tick++;
+        if (s_tick >= DONE_HOLD_TICKS) {
+            set_servo(0);
+            s_state = STATE_IDLE;  /* truly done */
+        } else {
+            /* Continue PID for 5s to hold ball at final position */
+            float trim = compute_vision_trim(s_target_mm, PID_CLAMP_DEG);
+            s_vision_trim = trim;
+            set_servo((int16_t)trim);
+        }
         return;
     }
 
@@ -334,7 +350,7 @@ void APP_BallCtrl1_TimerTick(void)
     if (s_total_ticks >= TOTAL_TIMEOUT_TICKS) {
         s_state = STATE_DONE;
         s_tick  = 0;
-        set_servo(0);
+        /* 5s hold then center (handled in STATE_DONE branch above) */
         return;
     }
 
@@ -417,7 +433,7 @@ void APP_BallCtrl1_TimerTick(void)
                 if (s_hold_ticks >= HOLD_TICKS) {
                     s_state = STATE_DONE;
                     s_tick  = 0;
-                    set_servo(0);
+                    /* Don't center yet — 5s hold then center (handled in TimerTick) */
                 }
             } else if (abs_err < (float)ARRIVE_THR_MM && abs_vel < HOLD_VEL_THR_MM_S) {
                 /* Within arrival zone, not deadband: keep adjusting */

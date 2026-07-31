@@ -45,30 +45,7 @@
 
 #include "mid_line_track.h"
 #include "mid_k230.h"
-#include "app_control.h"
-// #include "app_line_track_low_speed_circle.h"
-// #include "app_line_track_high_speed.h"
-// #include "app_ball_ctrl_1.h"
-// #include "app_line_track_low_speed_straight.h"
-#include "app_line_track_low_speed_circle.h"
-/* ---- Callback glue (lives in main.c, delegates to app layer) ---- */
-
-static void on_timer_10ms(void)
-{
-    BSP_Key_Scan();
-    APP_LineTrack_LowSpeedCircle_TimerTick();
-    BSP_DMA_RX_Process();
-}
-
-static void on_key_click(void)
-{
-    BSP_LED_Toggle();
-    if (APP_LineTrack_LowSpeedCircle_IsRunning()) {
-        APP_LineTrack_LowSpeedCircle_Stop();
-    } else {
-        APP_LineTrack_LowSpeedCircle_Start();
-    }
-}
+#include "app_menu.h"
 
 /* ---- Main ---- */
 
@@ -94,27 +71,22 @@ int main(void)
     MID_LineTrack_Init();
     MID_K230_Init();
 
-    /* [4] App layer init */
-    APP_Control_Init();
-    APP_LineTrack_LowSpeedCircle_Init();
+    /* [4] App layer: menu manages all apps */
+    APP_Menu_Init();
 
-    /* [5] Register cross-layer callbacks */
-    BSP_Timer_RegisterCallback(on_timer_10ms);
-    BSP_Key_RegisterClickCallback(on_key_click);
+    /* [5] Register timer callback (menu handles key + DMA internally) */
+    BSP_Timer_RegisterCallback(APP_Menu_TimerTick);
 
-    /* [6] Boot screen: LED on, OLED shows OK */
+    /* [6] Boot screen */
     BSP_LED_On();
     MID_OLED_ShowString(48, 24, "OK", 12);
     MID_OLED_RefreshGram();
     BSP_Delay_ms(500);
     BSP_LED_Off();
-    MID_OLED_ShowString(0, 0, "READY", 12);
-    MID_OLED_RefreshGram();
 
     /* [7] Main loop */
     while (1) {
-
         MID_K230_Poll();
-        APP_LineTrack_LowSpeedCircle_Run();
+        APP_Menu_Run();
     }
 }

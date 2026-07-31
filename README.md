@@ -118,11 +118,20 @@
     - [灰度循线 PD](#灰度循线-pd)
     - [OLED 显示](#oled-显示-3)
     - [文件](#文件-3)
+  - [动态平衡（Q6 定点保持）](#动态平衡q6-定点保持)
   - [引脚分配](#引脚分配)
   - [机械模块待测](#机械模块待测)
   - [水管非理想性问题与对策 (2026-07-30)](#水管非理想性问题与对策-2026-07-30)
   - [代码待清理](#代码待清理)
   - [APP_Test 模块当前状态](#app_test-模块当前状态)
+- [功能集成封装](#功能集成封装)
+  - [设计目标](#设计目标)
+  - [按钮交互](#按钮交互)
+  - [OLED 布局](#oled-布局)
+  - [App 表](#app-表)
+  - [架构](#架构)
+  - [关键实现细节](#关键实现细节)
+  - [涉及文件](#涉及文件)
 - [程序切换指南](#程序切换指南)
   - [当前可用的 app 模块](#当前可用的-app-模块)
   - [切换步骤](#切换步骤)
@@ -1835,6 +1844,126 @@ Phase 3: 6.20m → 7.00m  匀减速  a = 0.0382 m/s²  v = sqrt(v_cruise² - 2a(
 - `middleware/mid_line_track.c/h` — 灰度循线 PD（与 Q4 共用）
 - `middleware/mid_k230.c/h` — K230 三字段帧解析
 
+### 动态平衡（Q6 定点保持）
+
+> **赛题要求**：小车从 A 点出发，行驶过程中钢球稳定在被指定位置（按键时刻钢球所在位置），全程球偏离目标 ±1cm 内。
+
+#### 控制策略
+
+与 Q4/Q5 相同的总体框架：**K230 视觉闭环 PID + 编码器加速度前馈 + 灰度循线 PD**。核心差异：**目标不是固定 0mm，而是按键启动时捕获的钢球位置**（`s_target_mm`）。
+
+```
+10ms ISR 循环（100Hz）:
+    灰度传感器 → MID_LineTrack PD → 差速输出 → 电机速度 PI → TB6612
+    编码器 → 车速估算 → 加速度前馈 (-Kff × a_car) ─┐
+    K230 视觉 → 球位置 PID（目标=捕获位置）─────────┼→ 合路限幅 → 舵机
+```
+
+**Q6 独有特性**：
+- **定点捕获**：按键时记录当前 K230 位置作为 target，后续 PID 始终追这个固定目标（不是追 0）
+- **K230 启动保护**：如果按键时 K230 尚未就绪（数据过期），放弃启动，提示用户重试
+- **三区 PID**：根据球位置（`MID_K230_GetPosition()` 物理坐标）分三段独立参数
+
+#### 三区策略
+
+`MID_K230_GetPosition()` 返回物理坐标（正值 = 球在 +cm）。按球位置分为三区，各区独立 PID 参数 + 非线性 P 缩放强度不同：
+
+| 区域 | 球位置 (mm) | 物理特征 | P 项类型 | exponent |
+|------|------------|----------|---------|----------|
+| 负区 | pos ≤ -5 | 近旋转轴，机械灵敏度低 | 非线性 | **0.70** |
+| 中区 | -4 ~ +4 | 过渡区，中等灵敏度 | 非线性 | **0.80** |
+| 正区 | pos ≥ +5 | 远旋转轴，机械灵敏度高 | 非线性 | **0.85** |
+
+**非线性 P 缩放**（三区均启用）：
+
+```
+error_eff = sign(e) × (|e| / ref)^exp × ref    (ref = 10mm)
+exp < 1 → 压缩大误差、放大小误差
+exp 越大 → 越接近线性
+```
+
+| 参数 | 负区 | 中区 | 正区 |
+|------|------|------|------|
+| `VISION_KP` | -2.885 | -2.885 | -2.885 |
+| `VISION_KI` | -0.096 | -0.096 | -0.096 |
+| `VISION_KD` | -2.290 | -2.290 | -2.290 |
+| `ERR_EXPONENT` | 0.70 | 0.80 | 0.85 |
+
+> **设计逻辑**：越靠近旋转轴（负区），机械杠杆越弱，需要更强的非线性（小 exponent）来放大微小误差克服静摩擦。越远离旋转轴（正区），机械杠杆越强，大误差时舵机轻轻一动球就跑很远，exponent 接近 1.0 可以压缩大误差防 overshoot。正区参数待实测调优。
+
+#### 速度曲线（梯形：加速→巡航→减速）
+
+与 Q5 相同的速度参数：
+
+| 参数 | 数值 | 说明 |
+|------|------|------|
+| `APP_Q6_VCRUISE_MPS` | **0.2471 m/s** | 巡航速度 |
+| `APP_Q6_ACCEL_MPS2` | **0.030 m/s²** | 加速度 |
+| `APP_Q6_DECEL_MPS2` | **0.0382 m/s²** | 减速度 |
+| `APP_Q6_VMIN_MPS` | 0.04 m/s | 起始速度地板 |
+| `APP_Q6_ACCEL_DIST_M` | 1.20m | 加速段距离 |
+| `APP_Q6_DECEL_DIST_M` | 0.80m | 减速段距离 |
+| `APP_Q6_TARGET_DIST_M` | 7.20m | 自动停车总距离 |
+
+#### 电机速度闭环 PI
+
+| 参数 | 数值 | 说明 |
+|------|------|------|
+| `APP_Q6_KP` | 600 | 增量式离散 PI，100Hz |
+| `APP_Q6_KI` | 600 | |
+| `APP_Q6_PWM_MAX` | ±7800 | PWM 输出限幅 |
+| `APP_Q6_DEADBAND` | 0.005 m/s | 死区 |
+
+#### 视觉 PID 通用参数
+
+| 参数 | 数值 | 说明 |
+|------|------|------|
+| `VISION_I_MAX` | ±43° | 积分限幅 |
+| `VISION_I_ERR_THR` | 20mm | 积分分离阈值 |
+| `PID_CLAMP_DEG` | **±29.3°** | PID 总输出限幅 |
+| `FINE_ERR_THR_MM` | 20.0 | 微调柔化起始阈值 |
+| `FINE_SCALE_MIN` | 0.35 | error=0 时 P+I 缩放到 35% |
+| `VISION_DATA_TIMEOUT_MS` | 200 | K230 数据断流超时 |
+| `POS_JUMP_MAX_MM` | 20.0 | K230 异常跳变过滤（三区共用） |
+
+#### 加速度前馈参数
+
+| 参数 | 数值 | 说明 |
+|------|------|------|
+| `KFF_ACCEL` | **90.0** deg/(m/s²) | 巡航阶段 |
+| `KFF_ACCEL_STARTUP` | **45.0** deg/(m/s²) | 加速阶段（减半，防起步过冲） |
+| `FF_CLAMP_DEG` | ±35° | 前馈输出限幅 |
+| 车体加速度估计 | 低通滤波 α=0.3 | a_car = α × (v_now-v_prev)/10ms + (1-α) × a_prev |
+| 符号公式 | `ff = -Kff × a_car` | a_car>0 → 球滞后 → CCW（负 offset） |
+
+#### 停车后舵机延时
+
+自动停车后舵机继续工作 5s 稳定钢球，然后归中。与 Q4/Q5 一致。
+
+#### 舵机平滑
+
+| 参数 | 数值 | 说明 |
+|------|------|------|
+| 中位角度 | 135° | 摆杆水平 |
+| Slew rate limit | **5°/tick** | 每次舵角变化不超过 5°/10ms |
+
+#### OLED 显示
+
+| 状态 | 第 0 行 | 第 16 行 | 第 28 行 | 第 40 行 | 第 52 行 |
+|------|---------|----------|----------|----------|----------|
+| IDLE | `Q6 HOLD POS` | `Cur:+XXmm` | — | `Key=Lock` | — |
+| RUNNING | `Q6 +XXX` (目标速度) | `L:+XXX` `R:+XXX` | `B:+XXmm` `T:+XXmm` | `D:X.XX /7.20m` | `XX.XXs` `FF:+XXd` |
+| DONE | `Q6 DONE S:Xs` | `Dist:X.XX m` | — | `Avg:+XXX cm/s` | `Time:XX.XXs` |
+
+> **IDLE 状态**：显示当前球位置 `Cur:+XXmm`，提示 `Key=Lock`（按键锁定目标位置）。
+> **RUNNING 状态**：`B:` = 当前球位置，`T:` = 捕获的目标位置。
+
+#### 文件
+
+- `app/app_line_track_q6_hold_pos.c/h` — Q6 定点保持控制（三区 PID + 非线性 P + 异常值过滤 + 加速度前馈 + 梯形速度曲线）
+- `middleware/mid_line_track.c/h` — 灰度循线 PD（与 Q4/Q5 共用）
+- `middleware/mid_k230.c/h` — K230 三字段帧解析
+
 ### 引脚分配
 
 | 引脚 | 用途 | 状态 | 备注 |
@@ -1888,19 +2017,133 @@ Phase 3: 6.20m → 7.00m  匀减速  a = 0.0382 m/s²  v = sqrt(v_cruise² - 2a(
 - `APP_Test_Stop/IsRunning` — 停止/恢复中位
 
 
+## 功能集成封装
+
+> `app/app_menu.c` / `app/app_menu.h` — 菜单系统，将全部 7 个 app 统一封装，通过按钮即可切换与启停，无需重新编译。
+
+### 设计目标
+
+- **现场快速切换**：调试时无需连电脑改 `main.c`，双击按钮即可轮换 app
+- **统一 OLED 布局**：所有 app 共享标准顶栏（名称 + 启停状态 + 计时器）
+- **零破坏性**：每个 app 的接口和内部逻辑完全不变，脱离菜单仍可独立运行
+
+### 按钮交互
+
+| 操作 | 行为 |
+|------|------|
+| **单击** | 当前 app 的 Start / Stop 切换，计时器随之启停/归零 |
+| **双击** | 停止当前 app → 舵机回中 135° → 刹车 → 切换到下一个 app → 初始化新 app → 计时器归零 |
+
+### OLED 布局（128×64, 12px 字体）
+
+```
+╔══════════════════════════════════╗
+║ Q4 A->B BAL              ON    ║  y=0  菜单层：app 名称（左）+ ON/OFF（右）
+║ 00:12.35                       ║  y=12 菜单层：计时器 MM:SS.CC
+╠══════════════════════════════════╣
+║ B:+05mm  T:+00mm               ║  y=24 ┐
+║ D:1.23/2.00m                   ║  y=36  ├ app 数据区（各 app 自由使用）
+║ Err:+03mm  SA:142d             ║  y=48 ┘
+╚══════════════════════════════════╝
+```
+
+- 菜单层拥有上两行（y=0, y=12），每次 OLED 刷新时先让 app 绘制全屏，再覆盖顶栏
+- app 内部仍可调用 `MID_OLED_Clear()` + `RefreshGram()`，保证脱离菜单独立运行
+- 计时器仅当 `IsRunning() == true` 时累加，启停时自动归零
+- 计时器格式 `MM:SS.CC`（分:秒.厘秒），每 10ms tick 一次
+
+### App 表（双击轮换顺序）
+
+| # | 显示名 | 前缀 | 文件 | 停止判据 | 停止后舵机 |
+|---|--------|------|------|----------|-----------|
+| 1 | Q2 LINE-TRACK | `APP_LineTrack_` | `app_line_track_high_speed.c` | 4 连续灰度通道全黑 | 无舵机，仅刹车 |
+| 2 | Q3 BALANCE | `APP_BallCtrl1_` | `app_ball_ctrl_1.c` | 序列完成（O→+5→-5→HOLD）或 8s 超时 | 5s 后回 135° |
+| 3 | Q4 A->B | `APP_LineTrack_LowSpeedStraight_` | `app_line_track_low_speed_straight.c` | 里程计 ≥ 2.0m | 5s 后回 135° |
+| 4 | Q5 CIRCLE | `APP_LineTrack_LowSpeedCircle_` | `app_line_track_low_speed_circle.c` | 里程计 ≥ 7.0m | 5s 后回 135° |
+| 5 | Q6 HOLD POS | `APP_Q6_HoldPos_` | `app_line_track_q6_hold_pos.c` | 里程计 ≥ 7.2m | 5s 后回 135° |
+| 6 | TEST ENC | `APP_Test_` | `app_test.c` | 脉冲数 ≥ 目标值 | 无舵机 |
+| 7 | CONTROL | `APP_Control_` | `app_control.c` | 手动启停（无自动判据） | — |
+
+### 架构
+
+```
+main.c
+  ├── APP_Menu_Init()          // 初始化第一个 app + 注册按键回调
+  ├── BSP_Timer_RegisterCallback(APP_Menu_TimerTick)
+  │     ├── BSP_Key_Scan()     // 按键状态机（单击/双击检测）
+  │     ├── BSP_DMA_RX_Process()
+  │     ├── timer 累加（仅当 IsRunning）
+  │     └── g_apps[i].tick()   // 分发到当前 app
+  └── while(1)
+        ├── MID_K230_Poll()
+        └── APP_Menu_Run()     // 2Hz: Clear → app.run() → draw_header() → Refresh
+```
+
+### 关键实现细节
+
+**app_entry_t 函数指针表**：每个 app 通过统一接口注册：
+```c
+typedef struct {
+    const char *name;
+    void (*init)(void);
+    void (*tick)(void);
+    void (*run)(void);
+    void (*start)(void);
+    void (*stop)(void);
+    bool (*is_running)(void);
+} app_entry_t;
+```
+
+**双击回调**：`BSP_Key` 新增 `RegisterDoubleClickCallback()`。双击时：
+1. 调用当前 app 的 `stop()`
+2. `BSP_Servo_SetAngle(135)` + `BSP_Motor_Stop()` 确保安全
+3. 切换 `g_current` 索引
+4. 调用新 app 的 `init()`
+
+**单击回调**：每次单击重新注册——toggle 当前 app 的 `start()`/`stop()`，计时器归零。
+
+**app_control 适配**：`app_control` 原本只有 `ToggleStartStop()`，新增了 `APP_Control_Start()` / `APP_Control_Stop()` 薄包装，内部判断状态后调用 Toggle。
+
+**Q3 改动**：
+- 全局超时从 5s → 8s（`TOTAL_TIMEOUT_TICKS = 800`）
+- DONE 状态不再立即归中舵机，改为继续跑 PID 5s（`DONE_HOLD_TICKS = 500`）后再 `set_servo(0)`
+
+**OLED overlay 策略**：`APP_Menu_Run()` 调用顺序为 `Clear() → app.run() → draw_header() → RefreshGram()`。app 的 `run()` 内部仍有自己的 `Clear()` + `RefreshGram()`，导致每周期两次 SPI 刷新（约 4 次/秒），对 SSD1306 完全可忽略。
+
+**脱离菜单独立运行**：如需单独调试某个 app，只需在 `main.c` 中将 `APP_Menu_*` 替换回目标 app 的函数指针即可，app 内部代码无需任何改动。
+
+### 涉及文件
+
+| 文件 | 角色 |
+|------|------|
+| `app/app_menu.h` | 菜单 API 声明 |
+| `app/app_menu.c` | 菜单核心实现（app 表、按键分发、OLED 顶栏、计时器） |
+| `app/main.c` | 接入菜单系统（`APP_Menu_Init/TimerTick/Run`） |
+| `bsp/bsp_key.h` | 新增 `RegisterDoubleClickCallback()` |
+| `bsp/bsp_key.c` | 双击检测 → 触发回调 |
+| `app/app_control.h/c` | 新增 `Start()`/`Stop()` 包装 |
+| `app/app_ball_ctrl_1.c` | 超时 5s→8s + DONE 5s 舵机保持 |
+| `DC-Motor-Car.uvprojx` | Keil 项目已添加 `app_menu.c` |
+
+
 ## 程序切换指南
 
-> 当需要在不同 app 层模块之间切换时（如高速循线 ↔ 小球控制），只需修改 `app/main.c` 中的 7 处引用，不需要改动其他任何文件。
+> **主要方式**：使用菜单系统（双击切换，单击启停），无需修改代码。见[功能集成封装](#功能集成封装)。
+>
+> **独立调试方式**：如需脱离菜单单独调试某个 app，修改 `app/main.c` 中约 7 处引用即可。
 
 ### 当前可用的 app 模块
 
 | 模块 | 文件 | 函数前缀 | 用途 |
 |------|------|----------|------|
+| 菜单系统 | `app/app_menu.c/h` | `APP_Menu_` | 7 app 统一封装，双击切换、单击启停、OLED 统一顶栏 |
 | 高速循线 | `app/app_line_track_high_speed.c/h` | `APP_LineTrack_` | 0.35 m/s 高速 PD 循线，四通道全黑停车 + PI 主动刹车 |
 | 慢速直行循线 | `app/app_line_track_low_speed_straight.c/h` | `APP_LineTrack_LowSpeedStraight_` | 匀加速起步 + 匀速直行，2m 自动停车，OLED 显示速度/距离 |
-| 慢速环线循线 | `app/app_line_track_low_speed_circle.c/h` | `APP_LineTrack_LowSpeedCircle_` | 一圈匀加速 + 匀速环线，6.2m 自动停车，OLED 显示速度/距离 |
-| 舵机测试 | `app/app_test.c/h` | `APP_Test_` | 按键触发舵机交替步进，验证 PWM 输出和机械方向 |
-| **小球控制（Q3）** | `app/app_ball_ctrl_1.c/h` | `APP_BallCtrl1_` | 开环脉冲式小球定点控制，O→+5cm→-5cm，无传感器 |
+| 慢速环线循线 | `app/app_line_track_low_speed_circle.c/h` | `APP_LineTrack_LowSpeedCircle_` | 一圈匀加速 + 匀速环线，7m 自动停车，OLED 显示速度/距离 |
+| 定点保持（Q6） | `app/app_line_track_q6_hold_pos.c/h` | `APP_Q6_HoldPos_` | 7.2m 循线 + 锁定检测到的小球位置为 PID 目标 |
+| 舵机测试 | `app/app_test.c/h` | `APP_Test_` | 编码器 1m 标定 |
+| **小球控制（Q3）** | `app/app_ball_ctrl_1.c/h` | `APP_BallCtrl1_` | K230 纯视觉闭环 PID，O→+5cm→-5cm，8s 超时 |
+| 速度控制 | `app/app_control.c/h` | `APP_Control_` | PI 调参工具，支持 sweep + direct drive 模式 |
 
 ### 切换步骤
 

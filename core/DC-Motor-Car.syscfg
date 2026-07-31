@@ -37,6 +37,7 @@ const UART2   = UART.addInstance();
  */
 const divider7       = system.clockTree["PLL_PDIV"];
 divider7.divideValue = 2;
+9
 
 const divider9       = system.clockTree["UDIV"];
 divider9.divideValue = 2;

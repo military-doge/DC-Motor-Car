@@ -311,6 +311,20 @@ void APP_Control_Run(void)
     MID_OLED_RefreshGram();
 }
 
+void APP_Control_Start(void)
+{
+    if (s_flag_stop) {
+        APP_Control_ToggleStartStop();
+    }
+}
+
+void APP_Control_Stop(void)
+{
+    if (!s_flag_stop) {
+        APP_Control_ToggleStartStop();
+    }
+}
+
 void APP_Control_ToggleStartStop(void)
 {
     s_flag_stop = !s_flag_stop;

@@ -405,6 +405,11 @@
               <FilePath>.\app\app_line_track_low_speed_straight.c</FilePath>
             </File>
             <File>
+              <FileName>app_line_track_q6_hold_pos.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\app\app_line_track_q6_hold_pos.c</FilePath>
+            </File>
+            <File>
               <FileName>app_line_track_low_speed_circle.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\app\app_line_track_low_speed_circle.c</FilePath>
@@ -418,6 +423,11 @@
               <FileName>app_ball_ctrl_1.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\app\app_ball_ctrl_1.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_menu.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\app\app_menu.c</FilePath>
             </File>
           </Files>
         </Group>
