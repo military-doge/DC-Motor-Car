@@ -35,10 +35,10 @@
 #define SERVO_CENTER_DEG      135     /* horizontal */
 
 /* --- Vision PID gains (实测验证方向, KP/KI/KD < 0) --- */
-#define VISION_KP              -3.0f   /* P gain deg/mm */
-#define VISION_KI              -0.10f  /* I gain deg/mm/s */
-#define VISION_KD              -3.0f   /* D gain deg per mm/s (微分先行) */
-#define VISION_I_MAX            45.0f  /* integral clamp ±deg */
+#define VISION_KP              -2.885f /* P gain deg/mm */
+#define VISION_KI              -0.096f /* I gain deg/mm/s */
+#define VISION_KD              -2.290f /* D gain deg per mm/s (微分先行) */
+#define VISION_I_MAX            43.0f  /* integral clamp ±deg */
 #define VISION_I_ERR_THR        20.0f  /* integral separation: only integrate when |error| < this */
 #define VISION_DATA_TIMEOUT_MS 200     /* K230 data age threshold ms */
 
@@ -49,16 +49,23 @@
 /* --- Stuck detection (ball not moving despite servo action) --- */
 #define STUCK_VEL_THR_MM_S      5.0f   /* velocity below this = stuck (mm/s) */
 #define STUCK_POS_THR_MM        20.0f  /* position far from target (mm) */
-#define STUCK_BOOST_DEG         8.0f   /* extra deg when stuck detected */
+#define STUCK_BOOST_DEG         7.68f  /* extra deg when stuck detected */
 
 /* --- PID output clamp (±deg, symmetric) --- */
-#define PID_CLAMP_DEG           30.0f  /* full PID authority for movement */
+#define PID_CLAMP_DEG           29.3f  /* full PID authority for movement */
+
+/* --- Fine-tuning softener: scale down P+I near target, D always full --- */
+#define FINE_ERR_THR_MM          20.0f  /* error below this → begin scaling P+I */
+#define FINE_SCALE_MIN           0.35f  /* minimum scale factor at error=0 */
 
 /* --- Phase targets and arrival detection --- */
 #define TARGET_P5_MM            50     /* +5cm */
 #define TARGET_M5_MM           -50     /* -5cm */
 #define ARRIVE_THR_MM           10     /* ±10mm = arrived per competition ±1cm */
 #define ARRIVE_COUNT            10     /* consecutive frames to confirm arrival */
+#define HOLD_TICKS              50     /* hold at -5cm for 0.5s before DONE */
+#define HOLD_VEL_THR_MM_S        3.0f   /* ball must be slower than this to count as stationary */
+#define HOLD_DEADBAND_MM         6.0f   /* |error| < this → freeze servo, no more adjustment */
 #define TOTAL_TIMEOUT_TICKS     500    /* 5s total timeout */
 
 /* ========== internal types ========== */
@@ -67,6 +74,7 @@ typedef enum {
     STATE_IDLE,
     STATE_TO_P5,     /* moving ball from O → +5cm */
     STATE_TO_M5,     /* moving ball from +5cm → -5cm */
+    STATE_HOLD,      /* holding at -5cm for 1s before DONE */
     STATE_DONE,
 } state_t;
 
@@ -88,6 +96,7 @@ static float    s_k230_pos      = 0.0f; /* latest K230 position mm */
 static float    s_k230_error    = 0.0f; /* latest error mm */
 static bool     s_k230_has_prev = false;/* whether previous frame exists for dt calc */
 static uint8_t  s_arrive_cnt    = 0;    /* consecutive within-threshold frames */
+static uint16_t s_hold_ticks    = 0;    /* ticks held at -5cm within threshold */
 static float    s_target_mm     = 0.0f; /* current phase target mm */
 static int16_t  s_servo_angle   = 135;   /* current servo angle deg (for display) */
 
@@ -178,6 +187,19 @@ static float compute_vision_trim(float target_mm, float clamp_deg)
     if (trim > +clamp_deg) trim = +clamp_deg;
     if (trim < -clamp_deg) trim = -clamp_deg;
 
+    /* ---- Fine-tuning softener: scale down near target ---- */
+    {
+        float abs_err_fine = error_mm < 0 ? -error_mm : error_mm;
+        float scale;
+        if (abs_err_fine >= FINE_ERR_THR_MM) {
+            scale = 1.0f;
+        } else {
+            scale = FINE_SCALE_MIN
+                  + (1.0f - FINE_SCALE_MIN) * (abs_err_fine / FINE_ERR_THR_MM);
+        }
+        trim *= scale;
+    }
+
     return trim;
 }
 
@@ -196,6 +218,7 @@ static void vision_reset(void)
     s_prev_k230_pos  = 0.0f;
     s_prev_k230_ts   = 0;
     s_arrive_cnt     = 0;
+    s_hold_ticks     = 0;
 }
 
 static const char *state_name(state_t s)
@@ -204,6 +227,7 @@ static const char *state_name(state_t s)
     case STATE_IDLE:  return "IDLE";
     case STATE_TO_P5: return "TO_P5";
     case STATE_TO_M5: return "TO_M5";
+    case STATE_HOLD: return "HOLD";
     case STATE_DONE:  return "DONE";
     }
     return "?";
@@ -363,12 +387,46 @@ void APP_BallCtrl1_TimerTick(void)
             if (abs_err < (float)ARRIVE_THR_MM) {
                 s_arrive_cnt++;
                 if (s_arrive_cnt >= ARRIVE_COUNT) {
+                    s_state = STATE_HOLD;
+                    s_tick  = 0;
+                    s_hold_ticks = 0;
+                }
+            } else {
+                s_arrive_cnt = 0;
+            }
+        }
+        break;
+
+    case STATE_HOLD:
+        /*
+         * Hold at -5cm: PID live, but freeze servo if ball is
+         * within deadband + stationary for HOLD_TICKS to complete.
+         */
+        target = TARGET_M5_MM;
+        s_target_mm = (float)target;
+        trim   = compute_vision_trim((float)target, PID_CLAMP_DEG);
+        s_vision_trim = trim;
+
+        {
+            float abs_err = s_k230_error < 0 ? -s_k230_error : s_k230_error;
+            float abs_vel = s_ball_velocity < 0 ? -s_ball_velocity : s_ball_velocity;
+
+            if (abs_err < HOLD_DEADBAND_MM && abs_vel < HOLD_VEL_THR_MM_S) {
+                /* Ball stable in deadband: freeze servo, count hold */
+                s_hold_ticks++;
+                if (s_hold_ticks >= HOLD_TICKS) {
                     s_state = STATE_DONE;
                     s_tick  = 0;
                     set_servo(0);
                 }
+            } else if (abs_err < (float)ARRIVE_THR_MM && abs_vel < HOLD_VEL_THR_MM_S) {
+                /* Within arrival zone, not deadband: keep adjusting */
+                s_hold_ticks = 0;
+                set_servo((int16_t)trim);
             } else {
-                s_arrive_cnt = 0;
+                /* Ball moved: reset, keep adjusting */
+                s_hold_ticks = 0;
+                set_servo((int16_t)trim);
             }
         }
         break;
@@ -486,6 +544,42 @@ void APP_BallCtrl1_Run(void)
         MID_OLED_ShowNumber(30, 52, ARRIVE_COUNT, 2, 12);
         fmt_time(buf, s_total_ticks);
         MID_OLED_ShowString(60, 52, buf, 12);
+        break;
+
+    case STATE_HOLD:
+        MID_OLED_ShowString(22, 0, "Q3 HOLD -5 cm", 16);
+        /* Row 1: position | target */
+        MID_OLED_ShowString(0, 16, "P:", 12);
+        show_k230_pos(18, 16);
+        MID_OLED_ShowString(84, 16, "T:", 12);
+        show_target(96, 16, TARGET_M5_MM);
+        /* Row 2: error | trim */
+        MID_OLED_ShowString(0, 28, "E:", 12);
+        {
+            int32_t v = (int32_t)(s_k230_error >= 0 ? s_k230_error + 0.5f : s_k230_error - 0.5f);
+            char tbuf[7];
+            uint8_t p = 0;
+            if (v < 0) { tbuf[p++] = '-'; v = -v; }
+            else       { tbuf[p++] = '+'; }
+            tbuf[p++] = '0' + (v / 10) % 10;
+            tbuf[p++] = '0' + (v % 10);
+            tbuf[p++] = 'm'; tbuf[p++] = 'm'; tbuf[p] = '\0';
+            MID_OLED_ShowString(18, 28, tbuf, 12);
+        }
+        MID_OLED_ShowString(54, 28, "V:", 12);
+        show_vision_trim(72, 28);
+        /* Row 3: servo angle | hold count */
+        MID_OLED_ShowString(0, 40, "SA:", 12);
+        MID_OLED_ShowNumber(18, 40, (uint32_t)s_servo_angle, 3, 12);
+        MID_OLED_ShowString(54, 40, "H:", 12);
+        MID_OLED_ShowNumber(72, 40, s_hold_ticks, 3, 12);
+        /* Row 4: hold / required | time */
+        MID_OLED_ShowString(0, 52, "Hold:", 12);
+        MID_OLED_ShowNumber(36, 52, s_hold_ticks, 3, 12);
+        MID_OLED_ShowString(54, 52, "/", 12);
+        MID_OLED_ShowNumber(60, 52, HOLD_TICKS, 3, 12);
+        fmt_time(buf, s_total_ticks);
+        MID_OLED_ShowString(84, 52, buf, 12);
         break;
 
     case STATE_DONE: {
